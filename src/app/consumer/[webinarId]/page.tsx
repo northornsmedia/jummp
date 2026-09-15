@@ -1,7 +1,9 @@
-'use client';
-
 import React from 'react';
 import ComingSoon from '@/components/common/ComingSoon';
+
+export function generateStaticParams() {
+  return [{ webinarId: 'demo-room-101' }, { webinarId: 'broadcast-studio' }];
+}
 
 export default function ConsumerWebinarPage() {
   return (
