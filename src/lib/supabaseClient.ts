@@ -20,9 +20,13 @@ export interface DBMeeting {
   title: string;
   host_name: string;
   host_id?: string | null;
-  status: 'scheduled' | 'active' | 'ended';
+  status: 'scheduled' | 'active' | 'ended' | 'expired';
   scheduled_at?: string | null;
   created_at: string;
+  updated_at?: string;
+  last_activity_at?: string | null;
+  ended_at?: string | null;
+  is_locked?: boolean;
 }
 
 export interface DBParticipant {
@@ -42,7 +46,85 @@ export interface DBMessage {
   created_at: string;
 }
 
-// 1. Create or get existing meeting
+export interface MeetingStatusCheck {
+  exists: boolean;
+  meeting: DBMeeting | null;
+  isExpired: boolean;
+  isActive: boolean;
+  isEnded: boolean;
+  daysInactive: number;
+  message: string;
+}
+
+// Check meeting lifecycle status (e.g. anonymous user clicking link after days or weeks)
+export async function checkMeetingStatus(code: string): Promise<MeetingStatusCheck> {
+  try {
+    const { data: meeting, error } = await supabase
+      .from('meetings')
+      .select('*')
+      .eq('code', code)
+      .maybeSingle();
+
+    if (error || !meeting) {
+      return {
+        exists: false,
+        meeting: null,
+        isExpired: false,
+        isActive: false,
+        isEnded: false,
+        daysInactive: 0,
+        message: 'Meeting room does not exist yet. You can start it anew.',
+      };
+    }
+
+    const lastActivity = new Date(
+      meeting.last_activity_at || meeting.updated_at || meeting.created_at
+    ).getTime();
+    const now = Date.now();
+    const diffMs = now - lastActivity;
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    const diffMinutes = Math.floor(diffMs / (1000 * 60));
+
+    // Links inactive for more than 30 days are categorized as expired in Google Meet protocol
+    const isExpired = diffDays >= 30;
+
+    // Active if heartbeat within last 3 minutes and not ended
+    const isActive = meeting.status === 'active' && diffMinutes <= 3;
+    const isEnded = meeting.status === 'ended';
+
+    let message = 'Room is ready to join';
+    if (isExpired) {
+      message = `This meeting link expired after ${diffDays} days of inactivity.`;
+    } else if (isEnded) {
+      message = 'This meeting has ended. You can rejoin or start a new call.';
+    } else if (isActive) {
+      message = 'Meeting is currently live with active participants.';
+    }
+
+    return {
+      exists: true,
+      meeting: meeting as DBMeeting,
+      isExpired,
+      isActive,
+      isEnded,
+      daysInactive: diffDays,
+      message,
+    };
+  } catch (err) {
+    console.warn('Error checking meeting status:', err);
+    return {
+      exists: false,
+      meeting: null,
+      isExpired: false,
+      isActive: false,
+      isEnded: false,
+      daysInactive: 0,
+      message: 'Network check failed.',
+    };
+  }
+}
+
+// 1. Create or get existing meeting (with smart reactivation for perpetual links)
 export async function createOrGetMeeting(
   code: string,
   hostName: string = 'Host',
@@ -50,15 +132,28 @@ export async function createOrGetMeeting(
   scheduledAt?: string
 ): Promise<DBMeeting | null> {
   try {
-    // Check if meeting already exists
     const { data: existing } = await supabase
       .from('meetings')
       .select('*')
       .eq('code', code)
       .maybeSingle();
 
+    const nowIso = new Date().toISOString();
+
     if (existing) {
-      return existing as DBMeeting;
+      // Perpetual link: If meeting was ended in the past, or accessed weeks later,
+      // refresh activity so participants can rejoin smoothly
+      const { data: updated } = await supabase
+        .from('meetings')
+        .update({
+          status: 'active',
+          last_activity_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      return (updated as DBMeeting) || (existing as DBMeeting);
     }
 
     // Insert new meeting
@@ -70,6 +165,7 @@ export async function createOrGetMeeting(
         host_name: hostName,
         status: scheduledAt ? 'scheduled' : 'active',
         scheduled_at: scheduledAt || null,
+        last_activity_at: nowIso,
       })
       .select('*')
       .single();
@@ -86,7 +182,35 @@ export async function createOrGetMeeting(
   }
 }
 
-// 2. Add or update participant
+// 2. Heartbeat to keep meeting active and detect live participants
+export async function updateMeetingHeartbeat(meetingId: string): Promise<void> {
+  try {
+    await supabase
+      .from('meetings')
+      .update({
+        last_activity_at: new Date().toISOString(),
+        status: 'active',
+      })
+      .eq('id', meetingId);
+  } catch {}
+}
+
+// 3. Mark meeting as ended when last participant leaves or host terminates
+export async function endMeeting(meetingId: string): Promise<void> {
+  try {
+    const now = new Date().toISOString();
+    await supabase
+      .from('meetings')
+      .update({
+        status: 'ended',
+        ended_at: now,
+        last_activity_at: now,
+      })
+      .eq('id', meetingId);
+  } catch {}
+}
+
+// 4. Add or update participant
 export async function upsertParticipant(
   meetingId: string,
   name: string,
@@ -117,7 +241,7 @@ export async function upsertParticipant(
   }
 }
 
-// 3. Save chat message to database
+// 5. Save chat message to database
 export async function saveChatMessage(
   meetingId: string,
   senderName: string,
@@ -146,7 +270,7 @@ export async function saveChatMessage(
   }
 }
 
-// 4. Fetch recent chat messages
+// 6. Fetch recent chat messages
 export async function getMeetingMessages(meetingId: string): Promise<DBMessage[]> {
   try {
     const { data, error } = await supabase

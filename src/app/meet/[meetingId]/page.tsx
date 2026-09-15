@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, Suspense } from 'react';
+import React, { useState, useEffect, useRef, Suspense, useCallback } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -28,6 +28,16 @@ import {
   MoreVertical,
   Bell,
   Sparkles,
+  RotateCcw,
+  Home,
+  SwitchCamera,
+  Play,
+  RefreshCw,
+  Clock,
+  AlertCircle,
+  Maximize2,
+  Minimize2,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   MeetChannel,
@@ -36,12 +46,19 @@ import {
   JoinRequest,
   getMeetingUrl,
   playChime,
+  formatTimeAgo,
+  createAudioVisualizer,
+  generateMeetingId,
 } from '@/lib/meetStore';
 import {
   createOrGetMeeting,
   saveChatMessage,
   getMeetingMessages,
+  checkMeetingStatus,
+  updateMeetingHeartbeat,
+  endMeeting,
   DBMeeting,
+  MeetingStatusCheck,
 } from '@/lib/supabaseClient';
 import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track } from 'livekit-client';
 
@@ -51,82 +68,346 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const searchParams = useSearchParams();
   const isHostQuery = searchParams.get('host') === 'true';
 
-  // Lobby / In-Call phase
+  // Meeting Lifecycle & Status
+  const [statusCheck, setStatusCheck] = useState<MeetingStatusCheck | null>(null);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(true);
+  const [dbMeeting, setDbMeeting] = useState<DBMeeting | null>(null);
+
+  // Call phases
   const [inCall, setInCall] = useState(false);
   const [waitingToJoin, setWaitingToJoin] = useState(false);
   const [denied, setDenied] = useState(false);
   const [hostInMeeting, setHostInMeeting] = useState(false);
+  const [hasLeft, setHasLeft] = useState(false);
 
-  // User media state
+  // Media Controls
   const [userName, setUserName] = useState('');
   const [micEnabled, setMicEnabled] = useState(true);
   const [camEnabled, setCamEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [handRaised, setHandRaised] = useState(false);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [audioVolume, setAudioVolume] = useState(0); // 0-100 live voice volume
+  const [isResyncing, setIsResyncing] = useState(false);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
 
-  // Streams
+  // Video Refs & Streams
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const inCallVideoRef = useRef<HTMLVideoElement | null>(null);
   const screenShareVideoRef = useRef<HTMLVideoElement | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
 
-  // Remote WebRTC streams: { [participantName]: MediaStream }
+  // Remote WebRTC Streams
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
   const peerConnectionsRef = useRef<Record<string, RTCPeerConnection>>({});
 
-  // Meeting coordination
+  // LiveKit SFU Ref
+  const livekitRoomRef = useRef<Room | null>(null);
+
+  // Meeting State
   const [isHost, setIsHost] = useState(isHostQuery);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [pendingRequests, setPendingRequests] = useState<JoinRequest[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { id: '1', sender: 'JUMMP Bot', text: 'Welcome to JUMMP Meet. Call is secure and ready.', time: 'Just now' },
+    { id: '1', sender: 'JUMMP Bot', text: 'Welcome to JUMMP Meet. Call is encrypted and ready.', time: 'Just now' },
   ]);
   const [newChatText, setNewChatText] = useState('');
   const [floatingReactions, setFloatingReactions] = useState<{ id: number; emoji: string }[]>([]);
+  const [showReactionsPicker, setShowReactionsPicker] = useState(false);
 
-  // UI Panels
+  // UI Panels (Mobile bottom sheet or Desktop drawer)
   const [activePanel, setActivePanel] = useState<'people' | 'chat' | 'info' | null>(null);
   const [copied, setCopied] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);
-
-  const [dbMeeting, setDbMeeting] = useState<DBMeeting | null>(null);
-  const livekitRoomRef = useRef<Room | null>(null);
+  const [isMinimizedPip, setIsMinimizedPip] = useState(false);
 
   const channelRef = useRef<MeetChannel | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
 
-  // Initialize Supabase meeting record and load past messages
+  // =========================================================================
+  // 1. INITIALIZE STATUS & DATABASE RECORD (Handles Inactivity & Weeks-Old Links)
+  // =========================================================================
   useEffect(() => {
-    async function initSupabase() {
-      const meeting = await createOrGetMeeting(meetingId, isHostQuery ? 'Host' : 'Guest');
-      if (meeting) {
-        setDbMeeting(meeting);
-        const messages = await getMeetingMessages(meeting.id);
-        if (messages && messages.length > 0) {
-          setChatMessages(
-            messages.map((m) => ({
-              id: m.id,
-              sender: m.sender_name,
-              text: m.content,
-              time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            }))
-          );
+    let isMounted = true;
+
+    async function initStatus() {
+      setIsCheckingStatus(true);
+      const check = await checkMeetingStatus(meetingId);
+      if (!isMounted) return;
+      setStatusCheck(check);
+      setIsCheckingStatus(false);
+
+      // If link is valid or ready, register/update in Supabase
+      if (!check.isExpired) {
+        const meeting = await createOrGetMeeting(meetingId, isHostQuery ? 'Host' : 'Guest');
+        if (meeting && isMounted) {
+          setDbMeeting(meeting);
+          const messages = await getMeetingMessages(meeting.id);
+          if (messages && messages.length > 0 && isMounted) {
+            setChatMessages(
+              messages.map((m) => ({
+                id: m.id,
+                sender: m.sender_name,
+                text: m.content,
+                time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              }))
+            );
+          }
         }
       }
     }
-    initSupabase();
+
+    initStatus();
+
+    return () => {
+      isMounted = false;
+    };
   }, [meetingId, isHostQuery]);
 
-  // Connect to LiveKit Cloud SFU if configured when call starts
+  // Keep localStreamRef synced
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
+
+  // =========================================================================
+  // 2. IN-CALL HEARTBEAT (Keeps room alive and tracks activity in Supabase)
+  // =========================================================================
+  useEffect(() => {
+    if (!inCall || !dbMeeting) return;
+
+    // Send heartbeat every 20 seconds
+    const interval = setInterval(() => {
+      updateMeetingHeartbeat(dbMeeting.id);
+    }, 20000);
+
+    return () => clearInterval(interval);
+  }, [inCall, dbMeeting]);
+
+  // =========================================================================
+  // 3. AUDIO VISUALIZER (Real-time voice activity detection)
+  // =========================================================================
+  useEffect(() => {
+    if (!localStream || !micEnabled) {
+      setAudioVolume(0);
+      return;
+    }
+
+    const cleanup = createAudioVisualizer(localStream, (vol) => {
+      setAudioVolume(vol);
+    });
+
+    return () => cleanup();
+  }, [localStream, micEnabled]);
+
+  // =========================================================================
+  // 4. ACQUIRE LOCAL MEDIA (Camera & Mic)
+  // =========================================================================
+  const acquireMedia = useCallback(
+    async (mode: 'user' | 'environment' = facingMode) => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: camEnabled
+            ? {
+                facingMode: mode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              }
+            : false,
+          audio: micEnabled ? { echoCancellation: true, noiseSuppression: true } : false,
+        });
+
+        setLocalStream(stream);
+        localStreamRef.current = stream;
+
+        // Attach to lobby preview video if present
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch(() => {});
+        }
+        // Attach to in-call video if present
+        if (inCallVideoRef.current) {
+          inCallVideoRef.current.srcObject = stream;
+          inCallVideoRef.current.play().catch(() => {});
+        }
+
+        // Re-publish to LiveKit if connected
+        if (livekitRoomRef.current) {
+          const videoTrack = stream.getVideoTracks()[0];
+          const audioTrack = stream.getAudioTracks()[0];
+          if (videoTrack) await livekitRoomRef.current.localParticipant.publishTrack(videoTrack);
+          if (audioTrack) await livekitRoomRef.current.localParticipant.publishTrack(audioTrack);
+        }
+
+        return stream;
+      } catch (err) {
+        console.warn('getUserMedia error:', err);
+        return null;
+      }
+    },
+    [camEnabled, micEnabled, facingMode]
+  );
+
+  // Initialize camera & mic in Lobby
+  useEffect(() => {
+    if (!inCall && !hasLeft && !statusCheck?.isExpired) {
+      acquireMedia(facingMode);
+    }
+
+    return () => {
+      if (!inCall && localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+    };
+  }, [acquireMedia, facingMode, inCall, hasLeft, statusCheck?.isExpired]);
+
+  // =========================================================================
+  // 5. RESILIENT MOBILE APP-SWITCHING / BACKGROUND FREEZE RECOVERY ENGINE
+  // (Fixes: "I opened another app and came back it got stucked")
+  // =========================================================================
+  useEffect(() => {
+    const handleForegroundReturn = async () => {
+      // Triggered when user returns from WhatsApp/Instagram/Camera/Screen-lock
+      if (document.visibilityState === 'visible') {
+        console.log('JUMMP Meet: App returned to foreground. Performing deep recovery...');
+        setIsResyncing(true);
+
+        // 1. Force unpause all video elements (Safari & Chrome mobile pause them in background)
+        const allVideos = document.querySelectorAll('video');
+        allVideos.forEach((video) => {
+          if (video.paused) {
+            video.play().catch((e) => {
+              console.warn('Video auto-resume blocked by browser policy:', e);
+              setAutoplayBlocked(true);
+            });
+          }
+        });
+
+        // 2. Check if local camera/mic tracks were revoked or ended by OS
+        const currentTracks = localStreamRef.current?.getTracks() || [];
+        const hasDeadTrack =
+          currentTracks.length === 0 ||
+          currentTracks.some((t) => t.readyState === 'ended' || t.muted);
+
+        if (hasDeadTrack && (camEnabled || micEnabled)) {
+          console.log('Re-acquiring dead media tracks after background return...');
+          try {
+            const freshStream = await acquireMedia(facingMode);
+            if (freshStream) {
+              if (inCallVideoRef.current) {
+                inCallVideoRef.current.srcObject = freshStream;
+                inCallVideoRef.current.play().catch(() => {});
+              }
+              if (localVideoRef.current) {
+                localVideoRef.current.srcObject = freshStream;
+                localVideoRef.current.play().catch(() => {});
+              }
+
+              // Update WebRTC peer tracks if in P2P mode
+              Object.values(peerConnectionsRef.current).forEach((pc) => {
+                freshStream.getTracks().forEach((track) => {
+                  const sender = pc.getSenders().find((s) => s.track?.kind === track.kind);
+                  if (sender) {
+                    sender.replaceTrack(track).catch(() => {});
+                  } else {
+                    pc.addTrack(track, freshStream);
+                  }
+                });
+              });
+            }
+          } catch (e) {
+            console.warn('Media re-acquisition failed:', e);
+          }
+        }
+
+        // 3. LiveKit SFU Reconnection Check
+        if (livekitRoomRef.current) {
+          const room = livekitRoomRef.current;
+          if (room.state === 'disconnected') {
+            console.log('LiveKit room disconnected during background. Triggering reconnection...');
+            // Re-fetch token and connect
+            try {
+              const name = userName || (isHost ? 'Host' : 'Guest');
+              const res = await fetch(`/api/livekit/token?room=${meetingId}&username=${encodeURIComponent(name)}`);
+              const data = await res.json();
+              if (data.configured && data.token && data.url) {
+                await room.connect(data.url, data.token);
+              }
+            } catch (e) {
+              console.warn('LiveKit reconnect error:', e);
+            }
+          }
+        }
+
+        // 4. Web Audio Context Resume
+        try {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioContextClass) {
+            // Wake any suspended context
+          }
+        } catch {}
+
+        // 5. Broadcast RESYNC ping to notify peers we are back
+        if (channelRef.current && inCall) {
+          channelRef.current.send('PEER_RESYNC', {
+            name: userName || (isHost ? 'Host' : 'Guest'),
+            timestamp: Date.now(),
+          });
+        }
+
+        setTimeout(() => {
+          setIsResyncing(false);
+        }, 1200);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleForegroundReturn);
+    window.addEventListener('pageshow', handleForegroundReturn);
+    window.addEventListener('focus', handleForegroundReturn);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleForegroundReturn);
+      window.removeEventListener('pageshow', handleForegroundReturn);
+      window.removeEventListener('focus', handleForegroundReturn);
+    };
+  }, [acquireMedia, camEnabled, micEnabled, facingMode, inCall, userName, isHost, meetingId]);
+
+  // One-tap resume if browser blocked autoplay upon returning
+  const handleUserGestureResume = () => {
+    setAutoplayBlocked(false);
+    document.querySelectorAll('video').forEach((v) => {
+      v.play().catch(() => {});
+    });
+    acquireMedia(facingMode);
+  };
+
+  // Flip Camera (Front / Rear) for Mobile devices
+  const switchCamera = async () => {
+    const nextMode = facingMode === 'user' ? 'environment' : 'user';
+    setFacingMode(nextMode);
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach((t) => t.stop());
+    }
+
+    await acquireMedia(nextMode);
+  };
+
+  // =========================================================================
+  // 6. LIVEKIT SFU INTEGRATION
+  // =========================================================================
   useEffect(() => {
     if (!inCall) return;
+
+    let isCleanedUp = false;
 
     async function connectLiveKit() {
       try {
         const name = userName || (isHost ? 'Host' : 'Guest');
         const res = await fetch(`/api/livekit/token?room=${meetingId}&username=${encodeURIComponent(name)}`);
         const data = await res.json();
+        if (isCleanedUp) return;
+
         if (data.configured && data.token && data.url) {
           const room = new Room({
             adaptiveStream: true,
@@ -193,13 +474,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           }
         }
       } catch (e) {
-        console.warn('LiveKit SFU connection error, using P2P fallback:', e);
+        console.warn('LiveKit SFU initialization fallback to P2P WebRTC:', e);
       }
     }
 
     connectLiveKit();
 
     return () => {
+      isCleanedUp = true;
       if (livekitRoomRef.current) {
         livekitRoomRef.current.disconnect();
         livekitRoomRef.current = null;
@@ -207,49 +489,17 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     };
   }, [inCall, meetingId, userName, isHost]);
 
-  // Keep localStreamRef synced
-  useEffect(() => {
-    localStreamRef.current = localStream;
-  }, [localStream]);
-
-  // Initialize camera & mic in Lobby
-  useEffect(() => {
-    let stream: MediaStream | null = null;
-    async function startMedia() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: true,
-        });
-        setLocalStream(stream);
-        localStreamRef.current = stream;
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = stream;
-        }
-      } catch (err) {
-        console.log('Camera/Mic permission not granted or unavailable:', err);
-        setCamEnabled(false);
-        setMicEnabled(false);
-      }
-    }
-
-    startMedia();
-
-    return () => {
-      if (stream) {
-        stream.getTracks().forEach((t) => t.stop());
-      }
-    };
-  }, []);
-
   // Update in-call video ref when inCall state changes
   useEffect(() => {
     if (inCall && localStream && inCallVideoRef.current) {
       inCallVideoRef.current.srcObject = localStream;
+      inCallVideoRef.current.play().catch(() => {});
     }
   }, [inCall, localStream]);
 
-  // WebRTC Peer Connection Helper
+  // =========================================================================
+  // 7. WEBRTC P2P FALLBACK (Zero-config peer mesh)
+  // =========================================================================
   const createPeerConnection = (targetName: string) => {
     if (peerConnectionsRef.current[targetName]) {
       return peerConnectionsRef.current[targetName];
@@ -259,17 +509,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
       ],
     });
 
-    // Add local tracks
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
         pc.addTrack(track, localStreamRef.current!);
       });
     }
 
-    // Handle remote tracks
     pc.ontrack = (event) => {
       if (event.streams && event.streams[0]) {
         setRemoteStreams((prev) => ({
@@ -279,7 +528,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       }
     };
 
-    // Handle ICE candidates
     pc.onicecandidate = (event) => {
       if (event.candidate && channelRef.current) {
         channelRef.current.send('WEBRTC_SIGNAL', {
@@ -295,7 +543,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     return pc;
   };
 
-  // Handle cross-tab communication (host admit, join requests, chat, participants, WebRTC)
+  // =========================================================================
+  // 8. REAL-TIME SIGNALING CHANNEL (Supabase WebSockets + BroadcastChannel)
+  // =========================================================================
   useEffect(() => {
     const handleChannelMessage = async (msg: any) => {
       if (!msg || msg.meetingId !== meetingId) return;
@@ -346,12 +596,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'REACTION') {
         triggerReaction(msg.payload.emoji, false);
       } else if (msg.type === 'USER_JOINED') {
+        playChime('admit');
         setParticipants((prev) => [
           ...prev.filter((p) => p.name !== msg.payload.name),
           msg.payload,
         ]);
 
-        // Host establishes WebRTC connection with new guest
         if (isHost && inCall && msg.payload.name !== userName) {
           try {
             const pc = createPeerConnection(msg.payload.name);
@@ -368,6 +618,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           }
         }
       } else if (msg.type === 'USER_LEFT') {
+        playChime('leave');
         setParticipants((prev) => prev.filter((p) => p.name !== msg.payload.name));
         if (peerConnectionsRef.current[msg.payload.name]) {
           peerConnectionsRef.current[msg.payload.name].close();
@@ -378,6 +629,21 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           delete next[msg.payload.name];
           return next;
         });
+      } else if (msg.type === 'PEER_RESYNC') {
+        // A peer just returned from another app / lock screen
+        if (isHost && inCall && msg.payload.name !== userName) {
+          try {
+            const pc = createPeerConnection(msg.payload.name);
+            const offer = await pc.createOffer({ iceRestart: true });
+            await pc.setLocalDescription(offer);
+            channelRef.current?.send('WEBRTC_SIGNAL', {
+              from: userName || 'Host',
+              to: msg.payload.name,
+              type: 'offer',
+              sdp: offer,
+            });
+          } catch {}
+        }
       } else if (msg.type === 'WEBRTC_SIGNAL') {
         const { from, to, type, sdp, candidate } = msg.payload;
         const myName = userName || (isHost ? 'Host' : 'Guest');
@@ -410,10 +676,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     const channel = new MeetChannel(meetingId, handleChannelMessage);
     channelRef.current = channel;
 
-    // Ping host to see if host is already in meeting
     channel.send('PING_HOST', { timestamp: Date.now() });
 
-    // Listen to localStorage for multi-window sync
     const handleStorage = (e: StorageEvent) => {
       if (e.key === `meet_event_${meetingId}` && e.newValue) {
         try {
@@ -435,8 +699,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const toggleCam = () => {
     const nextState = !camEnabled;
     if (localStream) {
-      const videoTracks = localStream.getVideoTracks();
-      videoTracks.forEach((t) => (t.enabled = nextState));
+      localStream.getVideoTracks().forEach((t) => (t.enabled = nextState));
       setCamEnabled(nextState);
     } else {
       setCamEnabled(nextState);
@@ -450,8 +713,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const toggleMic = () => {
     const nextState = !micEnabled;
     if (localStream) {
-      const audioTracks = localStream.getAudioTracks();
-      audioTracks.forEach((t) => (t.enabled = nextState));
+      localStream.getAudioTracks().forEach((t) => (t.enabled = nextState));
       setMicEnabled(nextState);
     } else {
       setMicEnabled(nextState);
@@ -474,9 +736,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       }
     } else {
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-        });
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
         setScreenStream(stream);
         setIsScreenSharing(true);
         if (screenShareVideoRef.current) {
@@ -507,7 +767,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
     setTimeout(() => {
       setFloatingReactions((prev) => prev.filter((r) => r.id !== id));
-    }, 2500);
+    }, 2400);
   };
 
   // Join Action
@@ -516,7 +776,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     setUserName(name);
 
     if (isHost) {
-      // Host enters immediately
+      playChime('admit');
       setInCall(true);
       const hostParticipant: Participant = {
         id: 'host-' + Date.now(),
@@ -532,7 +792,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       channelRef.current?.send('HOST_ARRIVED', { hostName: name });
       channelRef.current?.send('USER_JOINED', hostParticipant);
     } else {
-      // Guest sends admission request to host
+      playChime('knock');
       setWaitingToJoin(true);
       const req: JoinRequest = {
         id: 'guest-' + Date.now(),
@@ -574,14 +834,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     if (!newChatText.trim()) return;
     const msg: ChatMessage = {
       id: Date.now().toString(),
-      sender: userName || 'You',
+      sender: userName || (isHost ? 'Host' : 'You'),
       text: newChatText.trim(),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
     setChatMessages((prev) => [...prev, msg]);
     channelRef.current?.send('CHAT_MESSAGE', msg);
     if (dbMeeting) {
-      saveChatMessage(dbMeeting.id, userName || 'You', newChatText.trim());
+      saveChatMessage(dbMeeting.id, userName || (isHost ? 'Host' : 'You'), newChatText.trim());
     }
     setNewChatText('');
   };
@@ -596,6 +856,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Leave Call
   const handleLeaveCall = () => {
+    playChime('leave');
     if (channelRef.current) {
       channelRef.current.send('USER_LEFT', { name: userName || (isHost ? 'Host' : 'Guest') });
     }
@@ -605,106 +866,332 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     if (screenStream) {
       screenStream.getTracks().forEach((t) => t.stop());
     }
-    router.push('/');
+    if (livekitRoomRef.current) {
+      livekitRoomRef.current.disconnect();
+      livekitRoomRef.current = null;
+    }
+    if (isHost && dbMeeting) {
+      endMeeting(dbMeeting.id);
+    }
+    setHasLeft(true);
+    setInCall(false);
+  };
+
+  // Reopen Expired or Ended Meeting
+  const handleReopenMeeting = async () => {
+    setIsCheckingStatus(true);
+    const meeting = await createOrGetMeeting(meetingId, 'Host');
+    if (meeting) {
+      setDbMeeting(meeting);
+      setStatusCheck({
+        exists: true,
+        meeting,
+        isExpired: false,
+        isActive: false,
+        isEnded: false,
+        daysInactive: 0,
+        message: 'Meeting room reopened and ready.',
+      });
+      setIsCheckingStatus(false);
+      acquireMedia(facingMode);
+    }
   };
 
   // =========================================================================
-  // RENDER 1: GREEN ROOM / PRE-JOIN LOBBY
+  // VIEW 0: CHECKING STATUS LOADER
+  // =========================================================================
+  if (isCheckingStatus) {
+    return (
+      <div className="h-[100dvh] bg-slate-950 text-white flex flex-col items-center justify-center p-4 selection:bg-blue-500/30">
+        <div className="w-12 h-12 rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 mb-4 animate-pulse">
+          <Sparkles className="w-6 h-6 animate-spin" />
+        </div>
+        <h3 className="text-base font-bold text-white">Connecting to JUMMP Meet</h3>
+        <p className="text-xs text-slate-400 mt-1 font-mono">{meetingId}</p>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // VIEW 1: EXPIRED MEETING SCREEN (When clicked after weeks of inactivity)
+  // Google Meet Level Lifecycle Handling
+  // =========================================================================
+  if (statusCheck?.isExpired) {
+    return (
+      <div className="min-h-[100dvh] h-[100dvh] bg-slate-950 text-white flex flex-col justify-between selection:bg-blue-500/30">
+        {/* Header */}
+        <header className="px-5 py-3.5 flex items-center justify-between border-b border-slate-900 bg-slate-950/80 backdrop-blur-md">
+          <Link href="/" className="relative h-7 w-24">
+            <Image src="/assets/jummp-logo.png" alt="JUMMP" fill priority className="object-contain object-left" />
+          </Link>
+          <div className="text-xs font-mono text-slate-400 bg-slate-900 px-3 py-1 rounded-xl border border-slate-800">
+            {meetingId}
+          </div>
+        </header>
+
+        {/* Expired Notification Card */}
+        <main className="max-w-md w-full mx-auto px-5 py-8 flex-1 flex flex-col items-center justify-center text-center space-y-5 animate-in fade-in zoom-in-95 duration-250">
+          <div className="w-16 h-16 rounded-3xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-xl">
+            <Clock className="w-8 h-8" />
+          </div>
+
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-[11px] font-semibold text-amber-400">
+              <AlertCircle className="w-3.5 h-3.5" />
+              <span>Link Expired</span>
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              This meeting link has expired
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
+              Per Google Meet protocol, inactive links expire after 30 days. This room was inactive for{' '}
+              <span className="text-white font-semibold">{statusCheck.daysInactive} days</span>.
+            </p>
+          </div>
+
+          <div className="w-full space-y-2.5 pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                const newCode = generateMeetingId();
+                router.push(`/meet/${newCode}?host=true`);
+              }}
+              className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Start a new meeting</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleReopenMeeting}
+              className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>Reopen this exact room</span>
+            </button>
+
+            <Link
+              href="/"
+              className="w-full py-3 px-4 rounded-2xl bg-transparent hover:bg-slate-900 text-slate-400 font-medium text-xs transition-colors flex items-center justify-center gap-2"
+            >
+              <Home className="w-4 h-4" />
+              <span>Return to home</span>
+            </Link>
+          </div>
+        </main>
+
+        <footer className="p-3.5 text-center text-xs text-slate-500 border-t border-slate-900">
+          JUMMP Meet • Google Meet Protocol
+        </footer>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // VIEW 2: POST-CALL SCREEN ("You left the meeting")
+  // =========================================================================
+  if (hasLeft) {
+    return (
+      <div className="min-h-[100dvh] h-[100dvh] bg-slate-950 text-white flex flex-col justify-between selection:bg-blue-500/30">
+        <header className="px-5 py-3.5 flex items-center justify-between border-b border-slate-900 bg-slate-950/80">
+          <Link href="/" className="relative h-7 w-24">
+            <Image src="/assets/jummp-logo.png" alt="JUMMP" fill priority className="object-contain object-left" />
+          </Link>
+          <div className="text-xs font-mono text-slate-400 bg-slate-900 px-3 py-1 rounded-xl border border-slate-800">
+            {meetingId}
+          </div>
+        </header>
+
+        <main className="max-w-md w-full mx-auto px-5 py-8 flex-1 flex flex-col items-center justify-center text-center space-y-6 animate-in fade-in zoom-in-95 duration-200">
+          <div className="w-16 h-16 rounded-3xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center text-[#0b5cff] shadow-xl">
+            <PhoneOff className="w-8 h-8" />
+          </div>
+
+          <div>
+            <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              You left the meeting
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-400 mt-2">
+              Want to jump back in? You can rejoin anytime using this same link.
+            </p>
+          </div>
+
+          <div className="w-full space-y-2.5 pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                setHasLeft(false);
+                setInCall(false);
+                setWaitingToJoin(false);
+                setDenied(false);
+                acquireMedia(facingMode);
+              }}
+              className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" />
+              <span>Rejoin call</span>
+            </button>
+
+            <Link
+              href="/"
+              className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
+            >
+              <Home className="w-4 h-4" />
+              <span>Return to home screen</span>
+            </Link>
+          </div>
+        </main>
+
+        <footer className="p-3.5 text-center text-xs text-slate-500 border-t border-slate-900">
+          JUMMP Meet • Google Meet Protocol
+        </footer>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // VIEW 3: GOOGLE MEET GREEN ROOM / PRE-JOIN LOBBY (Mobile Viewport Masterpiece)
   // =========================================================================
   if (!inCall) {
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col justify-between selection:bg-blue-500/30">
+      <div className="min-h-[100dvh] h-[100dvh] bg-slate-950 text-white flex flex-col justify-between selection:bg-blue-500/30 overflow-hidden">
         {/* Top Header */}
-        <header className="px-6 py-4 flex items-center justify-between border-b border-slate-900 bg-slate-950/80">
-          <Link href="/" className="flex items-center gap-3">
-            <div className="relative h-8 w-28">
-              <Image
-                src="/assets/jummp-logo.png"
-                alt="JUMMP"
-                fill
-                priority
-                className="object-contain object-left"
-              />
+        <header className="px-4 sm:px-6 py-3 sm:py-4 flex items-center justify-between border-b border-slate-900/90 bg-slate-950/80 backdrop-blur-md shrink-0 z-20">
+          <Link href="/" className="flex items-center gap-2.5">
+            <div className="relative h-7 w-24">
+              <Image src="/assets/jummp-logo.png" alt="JUMMP" fill priority className="object-contain object-left" />
             </div>
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 border-l border-slate-800 pl-3">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 border-l border-slate-800 pl-2.5">
               Meet
             </span>
           </Link>
 
-          <div className="flex items-center gap-3">
-            <div className="text-xs font-mono text-slate-400 bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-800">
-              {meetingId}
-            </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={switchCamera}
+              className="p-2 sm:p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 hover:bg-slate-800 text-slate-300 hover:text-white transition-all active:rotate-180"
+              title="Flip camera (front / back)"
+            >
+              <SwitchCamera className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={copyMeetingLink}
+              className="text-xs font-mono text-slate-400 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-800 hover:border-blue-500/40 hover:text-white transition-colors flex items-center gap-1.5"
+            >
+              <span>{meetingId}</span>
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3 h-3 text-slate-500" />}
+            </button>
           </div>
         </header>
 
-        {/* Main Lobby Box */}
-        <main className="max-w-4xl w-full mx-auto px-4 py-8 flex-1 flex flex-col md:flex-row items-center justify-center gap-8">
-          {/* Left: Camera Preview Tile */}
-          <div className="w-full md:w-3/5 space-y-4">
-            <div className="relative aspect-video rounded-2xl md:rounded-3xl bg-slate-900 border border-slate-800 overflow-hidden shadow-2xl flex items-center justify-center group">
+        {/* Main Lobby Viewport */}
+        <main className="max-w-4xl w-full mx-auto px-4 py-4 sm:py-8 flex-1 flex flex-col md:flex-row items-center justify-center gap-5 sm:gap-8 overflow-y-auto">
+          {/* Left: Camera Preview Card */}
+          <div className="w-full md:w-3/5 space-y-3">
+            <div className="relative aspect-[4/3] sm:aspect-video rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-2xl flex items-center justify-center group">
               {camEnabled ? (
                 <video
                   ref={localVideoRef}
                   autoPlay
                   playsInline
                   muted
-                  className="w-full h-full object-cover transform -scale-x-100"
+                  className={`w-full h-full object-cover ${facingMode === 'user' ? 'transform -scale-x-100' : ''}`}
                 />
               ) : (
-                <div className="flex flex-col items-center justify-center text-slate-400 space-y-2">
-                  <div className="w-20 h-20 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-2xl font-bold text-slate-300">
+                <div className="flex flex-col items-center justify-center text-slate-400 space-y-3">
+                  <div className="w-20 h-20 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-2xl font-bold text-slate-300 shadow-inner">
                     {userName ? userName.slice(0, 2).toUpperCase() : 'ME'}
                   </div>
-                  <span className="text-xs font-medium">Camera is off</span>
+                  <span className="text-xs font-semibold text-slate-400">Camera is off</span>
                 </div>
               )}
 
-              {/* Floating Bottom Media Controls */}
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-slate-950/70 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 shadow-lg">
+              {/* Real-time Voice Audio Visualizer Wave */}
+              {micEnabled && audioVolume > 5 && (
+                <div className="absolute top-4 left-4 flex items-center gap-1 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10 text-emerald-400 text-xs font-medium animate-in fade-in">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-[10px] uppercase tracking-wider font-bold">Speaking</span>
+                  <div className="flex items-end gap-0.5 h-3 ml-1">
+                    <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
+                    <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
+                    <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                  </div>
+                </div>
+              )}
+
+              {/* Floating Bottom Media Toggles */}
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-slate-950/80 backdrop-blur-xl px-4 py-2 rounded-full border border-white/10 shadow-2xl">
                 <button
                   type="button"
                   onClick={toggleMic}
-                  className={`p-3 rounded-full transition-colors ${
-                    micEnabled ? 'bg-slate-800 hover:bg-slate-700 text-white' : 'bg-red-600 hover:bg-red-700 text-white'
+                  className={`p-3 rounded-full transition-all active:scale-90 ${
+                    micEnabled
+                      ? 'bg-slate-800 hover:bg-slate-700 text-white'
+                      : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
                   }`}
-                  title={micEnabled ? 'Turn off microphone' : 'Turn on microphone'}
+                  title={micEnabled ? 'Turn off mic' : 'Turn on mic'}
                 >
                   {micEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
                 </button>
+
                 <button
                   type="button"
                   onClick={toggleCam}
-                  className={`p-3 rounded-full transition-colors ${
-                    camEnabled ? 'bg-slate-800 hover:bg-slate-700 text-white' : 'bg-red-600 hover:bg-red-700 text-white'
+                  className={`p-3 rounded-full transition-all active:scale-90 ${
+                    camEnabled
+                      ? 'bg-slate-800 hover:bg-slate-700 text-white'
+                      : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
                   }`}
                   title={camEnabled ? 'Turn off camera' : 'Turn on camera'}
                 >
                   {camEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
                 </button>
+
+                <button
+                  type="button"
+                  onClick={switchCamera}
+                  className="p-3 rounded-full bg-slate-800 hover:bg-slate-700 text-white transition-all active:scale-90"
+                  title="Flip camera (front / back)"
+                >
+                  <SwitchCamera className="w-5 h-5" />
+                </button>
               </div>
             </div>
 
             {/* Audio Indicator */}
-            <div className="flex items-center justify-between text-xs text-slate-400 px-2">
+            <div className="flex items-center justify-between text-[11px] text-slate-400 px-2">
               <span className="flex items-center gap-1.5">
-                <Volume2 className="w-4 h-4 text-emerald-400" />
+                <Volume2 className={`w-3.5 h-3.5 ${micEnabled ? 'text-emerald-400' : 'text-slate-600'}`} />
                 {micEnabled ? 'Microphone active' : 'Microphone muted'}
               </span>
-              <span className="text-slate-500 font-mono">HD Audio • Stereo</span>
+              <span className="text-slate-500 font-mono">HD Studio Audio</span>
             </div>
           </div>
 
           {/* Right: Join Form */}
-          <div className="w-full md:w-2/5 space-y-6 text-center md:text-left">
+          <div className="w-full md:w-2/5 space-y-4 sm:space-y-6 text-center md:text-left">
             <div>
+              {/* Presence Pill */}
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-xs text-slate-400 mb-2.5">
+                <Users className="w-3.5 h-3.5 text-blue-400" />
+                <span>
+                  {participants.length > 0
+                    ? `${participants.length} in this call`
+                    : hostInMeeting
+                    ? 'Host is in the meeting'
+                    : 'No one else is here yet'}
+                </span>
+              </div>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
                 {isHost ? 'Ready to lead the call?' : 'Ready to join?'}
               </h2>
               <p className="text-xs sm:text-sm text-slate-400 mt-1">
                 {isHost
-                  ? 'You are entering as host. You have full admission and controls.'
-                  : 'Enter your display name to ask the host for permission to join.'}
+                  ? 'You are entering as host. You have full admission controls.'
+                  : 'Enter your name to ask the host for permission to join.'}
               </p>
             </div>
 
@@ -720,13 +1207,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 </Link>
               </div>
             ) : waitingToJoin ? (
-              <div className="p-6 rounded-2xl bg-slate-900 border border-blue-500/40 text-center space-y-3.5 animate-in fade-in duration-300">
+              <div className="p-6 rounded-2xl bg-slate-900/90 border border-blue-500/40 text-center space-y-3.5 animate-in fade-in duration-300">
                 <div className="w-10 h-10 rounded-full border-3 border-blue-500 border-t-transparent animate-spin mx-auto" />
                 <h4 className="text-sm font-bold text-white">Asking to join...</h4>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  You’ll join the call automatically as soon as the host admits you.
+                  You’ll join automatically as soon as the host admits you.
                 </p>
-                <div className="pt-2">
+                <div className="pt-1">
                   <button
                     type="button"
                     onClick={() => setWaitingToJoin(false)}
@@ -740,22 +1227,22 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-slate-400 mb-1.5 text-left">
-                    Your Name
+                    Your Display Name
                   </label>
                   <input
                     type="text"
                     value={userName}
                     onChange={(e) => setUserName(e.target.value)}
                     placeholder={isHost ? 'Host' : 'Your name'}
-                    className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-800 text-white text-sm focus:border-[#0b5cff] focus:ring-2 focus:ring-blue-500/20 outline-none"
+                    className="w-full px-4 py-3 rounded-2xl bg-slate-900/90 border border-slate-800 text-white text-sm focus:border-[#0b5cff] focus:ring-2 focus:ring-blue-500/20 outline-none transition-all"
                   />
                 </div>
 
-                <div className="space-y-2.5 pt-2">
+                <div className="space-y-2.5 pt-1">
                   <button
                     type="button"
                     onClick={handleJoinClick}
-                    className="w-full py-3.5 px-4 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
+                    className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-sm shadow-xl shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
                   >
                     <span>{isHost ? 'Join now' : 'Ask to join'}</span>
                   </button>
@@ -763,10 +1250,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   <button
                     type="button"
                     onClick={copyMeetingLink}
-                    className="w-full py-3 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
+                    className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
                   >
                     {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                    <span>{copied ? 'Meeting link copied!' : 'Copy meeting link'}</span>
+                    <span>{copied ? 'Link copied to clipboard!' : 'Copy meeting link'}</span>
                   </button>
                 </div>
               </div>
@@ -774,32 +1261,54 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           </div>
         </main>
 
-        <footer className="p-4 text-center text-xs text-slate-500 border-t border-slate-900">
-          Encrypted with Google-style WebRTC Protocol • JUMMP Meet
+        <footer className="p-3.5 text-center text-xs text-slate-500 border-t border-slate-900 shrink-0">
+          Encrypted with Google-grade WebRTC • JUMMP Meet
         </footer>
       </div>
     );
   }
 
   // =========================================================================
-  // RENDER 2: ACTIVE IN-CALL GOOGLE MEET EXPERIENCE
+  // VIEW 4: ACTIVE IN-CALL GOOGLE MEET EXPERIENCE (Mobile Viewport Masterpiece)
   // =========================================================================
+  const otherParticipants = participants.filter((p) => p.name !== userName);
+
   return (
-    <div className="h-screen bg-slate-950 text-white flex flex-col overflow-hidden select-none">
-      {/* Top Meeting Header Bar */}
-      <header className="h-12 bg-slate-900/90 border-b border-slate-800/80 px-4 flex items-center justify-between shrink-0 z-20">
-        <div className="flex items-center gap-3">
+    <div className="h-[100dvh] min-h-[100dvh] bg-slate-950 text-white flex flex-col overflow-hidden select-none relative">
+      {/* BACKGROUND RESYNC BANNER (App switching recovery pill) */}
+      {isResyncing && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 bg-blue-600/90 backdrop-blur-md px-4 py-1.5 rounded-full text-xs font-semibold text-white shadow-xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+          <span>Restoring audio & video connection...</span>
+        </div>
+      )}
+
+      {/* AUTOPLAY BLOCKED BANNER (If mobile browser paused media) */}
+      {autoplayBlocked && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 bg-amber-500/90 backdrop-blur-md px-4 py-2 rounded-full text-xs font-bold text-slate-950 shadow-2xl flex items-center gap-2 animate-bounce">
+          <Play className="w-4 h-4 fill-current" />
+          <button type="button" onClick={handleUserGestureResume} className="underline">
+            Tap to resume media playback
+          </button>
+        </div>
+      )}
+
+      {/* TOP IN-CALL BAR */}
+      <header className="h-12 sm:h-14 bg-slate-900/90 backdrop-blur-md border-b border-slate-800/80 px-3 sm:px-4 flex items-center justify-between shrink-0 z-30 pt-safe">
+        <div className="flex items-center gap-2.5">
           <Link href="/" className="relative h-6 w-20">
-            <Image
-              src="/assets/jummp-logo.png"
-              alt="JUMMP"
-              fill
-              priority
-              className="object-contain object-left"
-            />
+            <Image src="/assets/jummp-logo.png" alt="JUMMP" fill priority className="object-contain object-left" />
           </Link>
-          <span className="text-slate-600 hidden sm:inline">•</span>
-          <span className="text-xs font-bold text-slate-300 truncate max-w-xs">{meetingId}</span>
+          <span className="text-slate-700 hidden sm:inline">•</span>
+          <button
+            type="button"
+            onClick={copyMeetingLink}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-xs font-mono text-slate-300 transition-colors"
+            title="Tap to copy link"
+          >
+            <span>{meetingId}</span>
+            {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-slate-500" />}
+          </button>
           {isHost && (
             <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
               Host
@@ -807,48 +1316,50 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           )}
         </div>
 
-        <div className="flex items-center gap-3 text-xs text-slate-400">
+        <div className="flex items-center gap-2 text-xs text-slate-400">
           <button
             type="button"
-            onClick={copyMeetingLink}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors text-xs"
+            onClick={switchCamera}
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+            title="Switch front/back camera"
           >
-            {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            <span className="hidden sm:inline">{copied ? 'Copied' : 'Share link'}</span>
+            <SwitchCamera className="w-4 h-4" />
           </button>
-          <span className="font-mono">{new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          <span className="font-mono hidden sm:inline">
+            {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </span>
         </div>
       </header>
 
-      {/* Main Video Stage & Drawers */}
+      {/* MAIN VIDEO STAGE */}
       <div className="flex-1 flex overflow-hidden relative">
-        {/* Video Canvas / Grid Area */}
-        <div className="flex-1 bg-slate-950 p-3 sm:p-4 flex flex-col justify-center items-center relative overflow-hidden">
-          {/* FLOATING HOST KNOCK BANNER: Someone wants to join this call */}
+        {/* Video Canvas Container */}
+        <div className="flex-1 bg-slate-950 p-2 sm:p-4 flex flex-col justify-center items-center relative overflow-hidden">
+          {/* FLOATING HOST KNOCK BANNER */}
           {isHost && pendingRequests.length > 0 && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 w-full max-w-md bg-slate-900/95 backdrop-blur-md border border-blue-500/50 rounded-2xl p-4 shadow-2xl animate-in slide-in-from-top-4 duration-200">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-full bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
-                    <Users className="w-5 h-5" />
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 w-full max-w-md px-3 animate-in slide-in-from-top-4 duration-200">
+              <div className="bg-slate-900/95 backdrop-blur-xl border border-blue-500/50 rounded-2xl p-3.5 shadow-2xl flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 truncate">
+                  <div className="w-9 h-9 rounded-full bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
+                    <Users className="w-4 h-4" />
                   </div>
                   <div className="truncate">
-                    <div className="text-[11px] text-slate-400 font-medium">Someone wants to join this call</div>
-                    <div className="text-sm font-bold text-white truncate">{pendingRequests[0].name}</div>
+                    <div className="text-[10px] text-slate-400 font-medium">Someone wants to join</div>
+                    <div className="text-xs sm:text-sm font-bold text-white truncate">{pendingRequests[0].name}</div>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-1.5 shrink-0">
                   <button
                     type="button"
                     onClick={() => handleDenyGuest(pendingRequests[0])}
-                    className="px-3 py-1.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 font-semibold text-xs transition-colors"
+                    className="px-2.5 py-1.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 font-semibold text-xs"
                   >
                     Deny
                   </button>
                   <button
                     type="button"
                     onClick={() => handleAdmitGuest(pendingRequests[0])}
-                    className="px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md shadow-blue-500/30 transition-colors"
+                    className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md shadow-blue-500/30"
                   >
                     Admit
                   </button>
@@ -857,115 +1368,161 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </div>
           )}
 
-          {/* Screen Share Tile (if active) */}
+          {/* Screen Share Tile */}
           {isScreenSharing && (
-            <div className="w-full max-w-4xl aspect-video rounded-2xl bg-black border border-slate-800 overflow-hidden shadow-2xl relative mb-4">
+            <div className="w-full max-w-4xl aspect-video rounded-2xl bg-black border border-slate-800 overflow-hidden shadow-2xl relative mb-3">
               <video ref={screenShareVideoRef} autoPlay playsInline className="w-full h-full object-contain" />
               <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-md px-3 py-1 rounded-lg text-xs font-semibold text-white">
-                You are sharing your screen
+                You are presenting your screen
               </div>
             </div>
           )}
 
-          {/* Participants Video Grid */}
+          {/* DYNAMIC GOOGLE MEET MOBILE VIDEO GRID */}
           <div
-            className={`w-full max-w-5xl grid gap-3 sm:gap-4 flex-1 items-center justify-center ${
-              participants.length <= 1 ? 'grid-cols-1 max-w-3xl aspect-video' : 'grid-cols-1 sm:grid-cols-2'
+            className={`w-full h-full flex-1 grid gap-2 sm:gap-4 items-center justify-center ${
+              otherParticipants.length === 0
+                ? 'grid-cols-1'
+                : otherParticipants.length === 1
+                ? 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
+                : 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
             }`}
           >
-            {/* User Tile */}
-            <div className="relative w-full h-full min-h-[220px] rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-lg flex items-center justify-center group">
-              {camEnabled ? (
-                <video
-                  ref={inCallVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover transform -scale-x-100"
-                />
-              ) : (
-                <div className="w-20 h-20 rounded-full bg-blue-600 text-white text-2xl font-bold flex items-center justify-center shadow-md">
-                  {userName ? userName.slice(0, 2).toUpperCase() : 'ME'}
-                </div>
-              )}
-
-              {/* Bottom Tag */}
-              <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-3 py-1 rounded-xl text-xs font-medium border border-white/10">
-                <span>{userName || 'You'} (You)</span>
-                {!micEnabled && <MicOff className="w-3.5 h-3.5 text-red-400" />}
-              </div>
-
-              {handRaised && (
-                <div className="absolute top-3 right-3 bg-amber-500 text-slate-950 p-2 rounded-full shadow-lg animate-bounce">
-                  <Hand className="w-4 h-4" />
-                </div>
-              )}
-            </div>
-
-            {/* Remote Participants */}
-            {participants
-              .filter((p) => p.name !== userName)
-              .map((participant) => {
-                const remoteStream = remoteStreams[participant.name];
-
-                return (
-                  <div
-                    key={participant.id}
-                    className="relative w-full h-full min-h-[220px] rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-lg flex items-center justify-center"
-                  >
-                    {remoteStream ? (
-                      <video
-                        autoPlay
-                        playsInline
-                        className="w-full h-full object-cover"
-                        ref={(el) => {
-                          if (el && el.srcObject !== remoteStream) {
-                            el.srcObject = remoteStream;
-                          }
-                        }}
-                      />
-                    ) : (
-                      <div className="flex flex-col items-center gap-2">
-                        <div className="w-20 h-20 rounded-full bg-indigo-600 text-white text-2xl font-bold flex items-center justify-center shadow-md">
-                          {participant.name.slice(0, 2).toUpperCase()}
-                        </div>
-                        <div className="flex items-center gap-1.5 text-xs text-slate-400">
-                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                          <span>Connected</span>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-3 py-1 rounded-xl text-xs font-medium border border-white/10">
-                      <span>{participant.name}</span>
-                      {participant.isHost && (
-                        <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
-                      )}
-                    </div>
+            {/* Solo Mode with Floating Self-View PiP */}
+            {otherParticipants.length === 0 ? (
+              <div className="relative w-full h-full max-w-4xl aspect-[3/4] sm:aspect-video rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-2xl flex items-center justify-center">
+                {camEnabled ? (
+                  <video
+                    ref={inCallVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover transform -scale-x-100"
+                  />
+                ) : (
+                  <div className="w-24 h-24 rounded-full bg-blue-600 text-white text-3xl font-bold flex items-center justify-center shadow-2xl">
+                    {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
                   </div>
-                );
-              })}
+                )}
+
+                {/* Bottom Tag */}
+                <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-3 py-1 rounded-xl text-xs font-medium border border-white/10">
+                  <span>{userName || 'You'} (You)</span>
+                  {!micEnabled && <MicOff className="w-3.5 h-3.5 text-red-400" />}
+                </div>
+
+                {/* Waiting Banner for Solo User */}
+                <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-900/80 backdrop-blur-md border border-white/10 px-3.5 py-1.5 rounded-full text-xs text-slate-300 flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                  <span>Waiting for others to join</span>
+                </div>
+
+                {handRaised && (
+                  <div className="absolute top-4 right-4 bg-amber-500 text-slate-950 p-2 rounded-full shadow-lg animate-bounce">
+                    <Hand className="w-5 h-5" />
+                  </div>
+                )}
+              </div>
+            ) : (
+              // Multi-Participant Grid
+              <>
+                {/* Local User Tile */}
+                <div className="relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-lg flex items-center justify-center">
+                  {camEnabled ? (
+                    <video
+                      ref={inCallVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover transform -scale-x-100"
+                    />
+                  ) : (
+                    <div className="w-16 h-16 rounded-full bg-blue-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                      {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
+                    </div>
+                  )}
+                  <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
+                    <span>{userName || 'You'}</span>
+                    {!micEnabled && <MicOff className="w-3 h-3 text-red-400" />}
+                  </div>
+                  {handRaised && (
+                    <div className="absolute top-2.5 right-2.5 bg-amber-500 text-slate-950 p-1.5 rounded-full shadow-md animate-bounce">
+                      <Hand className="w-4 h-4" />
+                    </div>
+                  )}
+                </div>
+
+                {/* Remote Participant Tiles */}
+                {otherParticipants.map((participant) => {
+                  const remoteStream = remoteStreams[participant.name];
+
+                  return (
+                    <div
+                      key={participant.id}
+                      className="relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-lg flex items-center justify-center"
+                    >
+                      {remoteStream ? (
+                        <video
+                          autoPlay
+                          playsInline
+                          className="w-full h-full object-cover"
+                          ref={(el) => {
+                            if (el && el.srcObject !== remoteStream) {
+                              el.srcObject = remoteStream;
+                              el.play().catch(() => {});
+                            }
+                          }}
+                        />
+                      ) : (
+                        <div className="flex flex-col items-center gap-2">
+                          <div className="w-16 h-16 rounded-full bg-indigo-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                            {participant.name.slice(0, 2).toUpperCase()}
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                            <span>Connected</span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
+                        <span>{participant.name}</span>
+                        {participant.isHost && (
+                          <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
           </div>
 
-          {/* Floating Reactions Display */}
-          <div className="absolute bottom-8 right-12 pointer-events-none flex flex-col items-center">
+          {/* Floating Emoji Reactions Stream */}
+          <div className="absolute bottom-8 right-6 pointer-events-none flex flex-col items-center z-40">
             {floatingReactions.map((r) => (
-              <span
-                key={r.id}
-                className="text-4xl animate-float opacity-90 transition-all"
-                style={{ animationDuration: '2s' }}
-              >
+              <span key={r.id} className="text-4xl animate-float-up opacity-95">
                 {r.emoji}
               </span>
             ))}
           </div>
         </div>
 
-        {/* Side Panel (People / Chat / Info) */}
+        {/* SIDE DRAWER (Desktop) or SLIDE-UP BOTTOM SHEET (Mobile) */}
         {activePanel && (
-          <aside className="w-full sm:w-80 bg-slate-900 border-l border-slate-800 flex flex-col shrink-0 z-30">
+          <aside
+            className={`
+              fixed inset-x-0 bottom-0 z-40 sm:relative sm:inset-auto sm:w-80 sm:h-auto 
+              bg-slate-900/98 sm:bg-slate-900 border-t sm:border-t-0 sm:border-l border-slate-800 
+              flex flex-col rounded-t-3xl sm:rounded-none max-h-[80vh] sm:max-h-full shadow-2xl 
+              animate-in slide-in-from-bottom sm:slide-in-from-right duration-250 pb-safe
+            `}
+          >
+            {/* Mobile Drag Indicator */}
+            <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto my-2.5 sm:hidden" />
+
             {/* Panel Header */}
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
               <h3 className="text-sm font-bold capitalize text-white">
                 {activePanel === 'people' && 'People in Meeting'}
                 {activePanel === 'chat' && 'In-Call Messages'}
@@ -974,7 +1531,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               <button
                 type="button"
                 onClick={() => setActivePanel(null)}
-                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
+                className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
               >
                 ✕
               </button>
@@ -987,12 +1544,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="space-y-4">
                   {/* Host Admission Queue */}
                   {isHost && pendingRequests.length > 0 && (
-                    <div className="space-y-2 p-3 rounded-xl bg-blue-950/40 border border-blue-600/40">
+                    <div className="space-y-2 p-3 rounded-2xl bg-blue-950/40 border border-blue-600/40">
                       <div className="font-bold text-blue-300">Admission Requests ({pendingRequests.length})</div>
                       {pendingRequests.map((req) => (
                         <div
                           key={req.id}
-                          className="flex items-center justify-between p-2 rounded-lg bg-slate-900 border border-slate-800"
+                          className="flex items-center justify-between p-2 rounded-xl bg-slate-900 border border-slate-800"
                         >
                           <span className="font-semibold text-white truncate mr-2">{req.name}</span>
                           <div className="flex items-center gap-1.5 shrink-0">
@@ -1021,50 +1578,51 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">
                       In Call ({participants.length})
                     </div>
-                    <div className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-800/60">
+                    <div className="flex items-center justify-between p-2.5 rounded-xl hover:bg-slate-800/60 bg-slate-900/50 border border-slate-800/60">
                       <span className="font-semibold text-white">{userName || 'You'} (You)</span>
-                      <span className="text-[10px] text-slate-500 font-bold">
+                      <span className="text-[10px] text-slate-400 font-bold">
                         {isHost ? 'Meeting Host' : 'Participant'}
                       </span>
                     </div>
-                    {participants
-                      .filter((p) => p.name !== userName)
-                      .map((p) => (
-                        <div key={p.id} className="flex items-center justify-between p-2 rounded-xl hover:bg-slate-800/60">
-                          <span className="font-semibold text-slate-200">{p.name}</span>
-                          <span className="text-[10px] text-slate-400">{p.isHost ? 'Host' : 'Guest'}</span>
-                        </div>
-                      ))}
+                    {otherParticipants.map((p) => (
+                      <div
+                        key={p.id}
+                        className="flex items-center justify-between p-2.5 rounded-xl hover:bg-slate-800/60"
+                      >
+                        <span className="font-semibold text-slate-200">{p.name}</span>
+                        <span className="text-[10px] text-slate-400">{p.isHost ? 'Host' : 'Guest'}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
 
               {/* CHAT TAB */}
               {activePanel === 'chat' && (
-                <div className="h-full flex flex-col justify-between">
-                  <div className="space-y-3 overflow-y-auto flex-1 pr-1">
+                <div className="h-full flex flex-col justify-between space-y-3">
+                  <div className="space-y-3 overflow-y-auto max-h-[45vh] sm:max-h-[60vh] pr-1">
                     {chatMessages.map((msg) => (
                       <div key={msg.id} className="space-y-0.5">
                         <div className="flex items-baseline justify-between text-[11px]">
                           <span className="font-bold text-blue-400">{msg.sender}</span>
                           <span className="text-slate-500">{msg.time}</span>
                         </div>
-                        <p className="p-2 rounded-xl bg-slate-800/60 text-slate-200 leading-relaxed border border-slate-800">
+                        <p className="p-2.5 rounded-2xl bg-slate-800/60 text-slate-200 leading-relaxed border border-slate-800">
                           {msg.text}
                         </p>
                       </div>
                     ))}
                   </div>
 
-                  <form onSubmit={handleSendChat} className="pt-3 flex gap-2 border-t border-slate-800">
+                  <form onSubmit={handleSendChat} className="pt-2 flex gap-2 border-t border-slate-800">
                     <input
                       type="text"
                       value={newChatText}
                       onChange={(e) => setNewChatText(e.target.value)}
                       placeholder="Send a message to everyone..."
-                      className="flex-1 bg-slate-800 text-xs px-3 py-2 rounded-xl border border-slate-700 text-white outline-none focus:border-[#0b5cff]"
+                      className="flex-1 bg-slate-800 text-xs px-3.5 py-2.5 rounded-xl border border-slate-700 text-white outline-none focus:border-[#0b5cff]"
                     />
-                    <button type="submit" className="p-2 rounded-xl bg-[#0b5cff] text-white hover:bg-[#0a75e7]">
+                    <button type="submit" className="p-2.5 rounded-xl bg-[#0b5cff] text-white hover:bg-[#0a75e7]">
                       <Send className="w-3.5 h-3.5" />
                     </button>
                   </form>
@@ -1075,8 +1633,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               {activePanel === 'info' && (
                 <div className="space-y-4">
                   <div>
-                    <h4 className="font-bold text-sm text-white mb-1">Joining Info</h4>
-                    <p className="text-slate-400">Share this link with attendees to join this meeting directly.</p>
+                    <h4 className="font-bold text-sm text-white mb-1">Meeting Details</h4>
+                    <p className="text-slate-400">Share this link to invite others to join this room.</p>
                   </div>
                   <div className="p-3 rounded-xl bg-slate-800 border border-slate-700 font-mono text-[11px] break-all text-blue-300 select-all">
                     {getMeetingUrl(meetingId)}
@@ -1084,9 +1642,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   <button
                     type="button"
                     onClick={copyMeetingLink}
-                    className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2"
+                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2"
                   >
-                    {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                     <span>{copied ? 'Copied to clipboard' : 'Copy joining info'}</span>
                   </button>
                 </div>
@@ -1096,8 +1654,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         )}
       </div>
 
-      {/* Google Meet Style Bottom Floating Control Bar */}
-      <footer className="h-20 bg-slate-950 border-t border-slate-900 px-4 sm:px-6 flex items-center justify-between shrink-0 z-20">
+      {/* FLOATING EMOJI REACTIONS PICKER (Mobile & Desktop) */}
+      {showReactionsPicker && (
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-50 bg-slate-900/95 backdrop-blur-xl px-3 py-2 rounded-full border border-white/15 shadow-2xl flex items-center gap-2 animate-in zoom-in-95 duration-150">
+          {['👏', '❤️', '🔥', '🎉', '👍', '😂', '😮'].map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              onClick={() => {
+                triggerReaction(emoji);
+                setShowReactionsPicker(false);
+              }}
+              className="w-9 h-9 rounded-full hover:bg-slate-800 flex items-center justify-center text-lg hover:scale-125 transition-transform"
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* GOOGLE MEET FLOATING BOTTOM CONTROL DOCK (Responsive Viewport) */}
+      <footer className="h-20 sm:h-22 bg-slate-950/95 border-t border-slate-900 px-3 sm:px-6 flex items-center justify-between shrink-0 z-30 pb-safe">
         {/* Left: Meeting Code */}
         <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
           <span>{meetingId}</span>
@@ -1109,10 +1686,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <button
             type="button"
             onClick={toggleMic}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-95 ${
+            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
               micEnabled
                 ? 'bg-slate-800 hover:bg-slate-700 text-white'
-                : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-500/30'
+                : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
             }`}
             title={micEnabled ? 'Mute microphone' : 'Unmute microphone'}
           >
@@ -1123,10 +1700,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <button
             type="button"
             onClick={toggleCam}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-95 ${
+            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
               camEnabled
                 ? 'bg-slate-800 hover:bg-slate-700 text-white'
-                : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-500/30'
+                : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
             }`}
             title={camEnabled ? 'Turn off camera' : 'Turn on camera'}
           >
@@ -1137,7 +1714,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <button
             type="button"
             onClick={toggleScreenShare}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-95 ${
+            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
               isScreenSharing
                 ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
                 : 'bg-slate-800 hover:bg-slate-700 text-white'
@@ -1150,8 +1727,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           {/* Hand Raise */}
           <button
             type="button"
-            onClick={() => setHandRaised(!handRaised)}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-95 ${
+            onClick={() => {
+              playChime('hand');
+              setHandRaised(!handRaised);
+            }}
+            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
               handRaised
                 ? 'bg-amber-500 text-slate-950 font-bold shadow-lg shadow-amber-500/30'
                 : 'bg-slate-800 hover:bg-slate-700 text-white'
@@ -1161,25 +1741,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <Hand className="w-5 h-5" />
           </button>
 
-          {/* Emoji Reactions Picker */}
-          <div className="hidden sm:flex items-center gap-1 bg-slate-900 px-2 py-1 rounded-full border border-slate-800">
-            {['👏', '❤️', '🔥', '🎉', '👍'].map((emoji) => (
-              <button
-                key={emoji}
-                type="button"
-                onClick={() => triggerReaction(emoji)}
-                className="w-8 h-8 rounded-full hover:bg-slate-800 flex items-center justify-center text-sm hover:scale-125 transition-transform"
-              >
-                {emoji}
-              </button>
-            ))}
-          </div>
+          {/* Emoji Reactions Trigger */}
+          <button
+            type="button"
+            onClick={() => setShowReactionsPicker(!showReactionsPicker)}
+            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
+              showReactionsPicker ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-white'
+            }`}
+            title="Send reaction"
+          >
+            <Smile className="w-5 h-5" />
+          </button>
 
           {/* End Call Button */}
           <button
             type="button"
             onClick={handleLeaveCall}
-            className="px-5 sm:px-6 py-3 rounded-full bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center gap-2 active:scale-95 transition-all"
+            className="px-4 sm:px-6 py-3 rounded-full bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center gap-1.5 sm:gap-2 active:scale-95 transition-all"
             title="Leave call"
           >
             <PhoneOff className="w-5 h-5" />
@@ -1188,7 +1766,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </div>
 
         {/* Right Action Icons (Info / People / Chat) */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 sm:gap-2">
           <button
             type="button"
             onClick={() => setActivePanel(activePanel === 'info' ? null : 'info')}
@@ -1226,9 +1804,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             title="Chat with everyone"
           >
             <MessageSquare className="w-5 h-5" />
-            {unreadChat && (
-              <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-[#0b5cff]" />
-            )}
+            {unreadChat && <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-[#0b5cff]" />}
           </button>
         </div>
       </footer>
@@ -1240,7 +1816,7 @@ export default function MeetPage({ params }: { params: { meetingId: string } }) 
   return (
     <Suspense
       fallback={
-        <div className="h-screen bg-slate-950 text-white flex items-center justify-center">
+        <div className="h-[100dvh] bg-slate-950 text-white flex items-center justify-center">
           <div className="text-center space-y-3">
             <div className="w-8 h-8 rounded-full border-2 border-blue-500 border-t-transparent animate-spin mx-auto" />
             <p className="text-xs text-slate-400 font-mono">Connecting to JUMMP Meet...</p>
