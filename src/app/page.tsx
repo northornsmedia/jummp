@@ -28,6 +28,7 @@ import Navbar from '@/components/layout/Navbar';
 import Footer from '@/components/layout/Footer';
 import ViewportIndicator from '@/components/common/ViewportIndicator';
 import { useViewport } from '@/hooks/useViewport';
+import MeetingBar from '@/components/meet/MeetingBar';
 
 export default function LandingPage() {
   const { isMobile } = useViewport();
@@ -97,7 +98,7 @@ export default function LandingPage() {
                 href="/signup"
                 className="w-full sm:w-auto inline-flex items-center justify-center gap-2 text-base font-bold text-white bg-[#0b5cff] hover:bg-[#0a75e7] px-8 py-4 rounded-xl shadow-lg shadow-blue-500/25 active:scale-98 transition-all"
               >
-                Start Now
+                Start Free Account
                 <ArrowRight className="w-5 h-5" />
               </Link>
               <button
@@ -110,6 +111,23 @@ export default function LandingPage() {
                 </div>
                 Product walkthrough
               </button>
+            </div>
+
+            {/* Google Meet Style Instant Start & Join Bar on Front Page */}
+            <div className="mt-8 max-w-xl mx-auto">
+              <div className="p-3 sm:p-3.5 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200/90 shadow-xl shadow-blue-500/5">
+                <div className="flex items-center justify-between px-2 pb-2.5 text-xs text-slate-500 border-b border-slate-100 mb-3">
+                  <div className="flex items-center gap-1.5 font-bold text-[#00053d]">
+                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>JUMMP Meet</span>
+                    <span className="font-normal text-slate-400">• Google Meet style calls</span>
+                  </div>
+                  <span className="text-[10px] font-bold text-[#0b5cff] bg-blue-50 border border-blue-100 px-2 py-0.5 rounded-full">
+                    Instant Link • No Install
+                  </span>
+                </div>
+                <MeetingBar />
+              </div>
             </div>
 
             {/* Live Metrics Row */}
@@ -198,6 +216,71 @@ export default function LandingPage() {
                   <div className="text-sm font-bold text-[#00053d]">Zero App Installs</div>
                 </div>
               </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ================= JUMMP MEET (GOOGLE MEET SERVICE) SHOWCASE ================= */}
+        <section id="meet" className="py-16 md:py-24 bg-gradient-to-b from-white via-blue-50/20 to-white">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="text-center max-w-3xl mx-auto mb-12">
+              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
+                JUMMP Meet Service
+              </span>
+              <h2 className="text-3xl sm:text-4xl md:text-5xl font-extrabold text-[#00053d] mt-3 tracking-tight">
+                Google Meet simplicity, <span className="text-[#0b5cff]">built right into JUMMP</span>.
+              </h2>
+              <p className="text-slate-600 mt-4 text-base sm:text-lg leading-relaxed">
+                Start instant video meetings or schedule ahead. Generates dynamic Google Meet-style links with our domain, real-time host admission control, and encrypted audio & video.
+              </p>
+            </div>
+
+            {/* Google Meet Features Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto mb-12">
+              <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition-shadow">
+                <div className="w-12 h-12 rounded-xl bg-blue-50 text-[#0b5cff] flex items-center justify-center mb-4">
+                  <Video className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg font-bold text-[#00053d]">Dynamic Meeting Links</h3>
+                <p className="text-xs sm:text-sm text-slate-500 mt-2 leading-relaxed">
+                  Every click creates a unique Google Meet style link like <code className="text-[#0b5cff] font-mono font-bold bg-blue-50 px-1.5 py-0.5 rounded">jmp-xxxx-yyy</code> with our URL. No account needed to join.
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition-shadow">
+                <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-4">
+                  <ShieldCheck className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg font-bold text-[#00053d]">Host Knock & Admission</h3>
+                <p className="text-xs sm:text-sm text-slate-500 mt-2 leading-relaxed">
+                  Guests wait in the green room and ask to join. The host receives real-time audio chimes and top-screen prompts to admit or deny entry.
+                </p>
+              </div>
+
+              <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition-shadow">
+                <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-4">
+                  <Zap className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg font-bold text-[#00053d]">Audio, Video & Screen Share</h3>
+                <p className="text-xs sm:text-sm text-slate-500 mt-2 leading-relaxed">
+                  Full Google Meet style bottom controls: mute/unmute, HD webcam feeds, display sharing, floating reactions, hand raising, and in-call chat.
+                </p>
+              </div>
+            </div>
+
+            {/* Quick Action Container */}
+            <div className="max-w-2xl mx-auto p-6 rounded-3xl bg-slate-900 text-white shadow-2xl border border-slate-800 text-center">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-wider mb-4 border border-blue-500/30">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Try JUMMP Meet Right Now</span>
+              </div>
+              <h3 className="text-xl sm:text-2xl font-extrabold text-white mb-2">
+                Ready to hop on a call?
+              </h3>
+              <p className="text-xs sm:text-sm text-slate-400 mb-6">
+                Click below to start an instant meeting or schedule one for later.
+              </p>
+              <MeetingBar />
             </div>
           </div>
         </section>

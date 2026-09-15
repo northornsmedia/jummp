@@ -4,8 +4,9 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { Menu, X, ArrowRight, Sparkles, Bell, CheckCircle2 } from 'lucide-react';
+import { Menu, X, ArrowRight, Sparkles, Bell, CheckCircle2, Video } from 'lucide-react';
 import { useViewport } from '@/hooks/useViewport';
+import { generateMeetingId } from '@/lib/meetStore';
 
 export default function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -109,6 +110,18 @@ export default function Navbar() {
 
             {/* Desktop Right CTAs */}
             <div className="hidden md:flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  const id = generateMeetingId();
+                  window.location.href = `/meet/${id}?host=true`;
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-blue-200 bg-blue-50/70 text-[#0b5cff] hover:bg-blue-100 font-bold text-xs transition-colors shadow-2xs"
+                title="Start a Google Meet style instant video call"
+              >
+                <Video className="w-3.5 h-3.5" />
+                <span>Meet</span>
+              </button>
               <Link
                 href="/login"
                 className="text-sm font-semibold text-slate-700 hover:text-[#0b5cff] px-3 py-2 transition-colors"
@@ -164,6 +177,17 @@ export default function Navbar() {
               ))}
             </div>
             <div className="pt-3 border-t border-slate-100 flex flex-col gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  const id = generateMeetingId();
+                  window.location.href = `/meet/${id}?host=true`;
+                }}
+                className="w-full flex items-center justify-center gap-2 py-2.5 text-xs font-bold text-[#0b5cff] bg-blue-50 hover:bg-blue-100 rounded-xl border border-blue-200 transition-colors"
+              >
+                <Video className="w-4 h-4" />
+                <span>Start Instant Meeting</span>
+              </button>
               <Link
                 href="/login"
                 className="w-full text-center py-2.5 text-sm font-semibold text-slate-700 bg-slate-50 hover:bg-slate-100 rounded-xl"
