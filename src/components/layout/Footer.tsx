@@ -2,6 +2,7 @@
 
 import React from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { Video, Globe, Shield, Sparkles, CheckCircle2, Apple } from 'lucide-react';
 
 export default function Footer() {
@@ -11,13 +12,15 @@ export default function Footer() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-10 pb-12 border-b border-slate-100">
           {/* Brand Col */}
           <div className="lg:col-span-2 space-y-4">
-            <Link href="/" className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-[#0b5cff] to-[#3b82f6] flex items-center justify-center text-white shadow-xs">
-                <Video className="w-4 h-4" />
+            <Link href="/" className="inline-block">
+              <div className="relative h-8 w-28">
+                <Image
+                  src="/assets/jummp-logo.png"
+                  alt="JUMMP"
+                  fill
+                  className="object-contain object-left"
+                />
               </div>
-              <span className="text-2xl font-black tracking-tight text-[#00053d]">
-                JUMMP
-              </span>
             </Link>
             <p className="text-sm text-slate-500 max-w-sm leading-relaxed">
               Scaling the world&apos;s live experiences. The enterprise-grade broadcast platform that doesn&apos;t compromise on quality, pricing, or scale.

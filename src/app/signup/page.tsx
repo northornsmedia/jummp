@@ -2,6 +2,7 @@
 
 import React, { useState, Suspense } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Video, ArrowRight, Mail, User, Lock, Sparkles, CheckCircle2 } from 'lucide-react';
 import ViewportIndicator from '@/components/common/ViewportIndicator';
@@ -163,13 +164,16 @@ export default function SignupPage() {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-between p-4 sm:p-6 text-[#0a0a0a]">
       <div className="flex items-center justify-between max-w-5xl mx-auto w-full">
-        <Link href="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-[#0b5cff] to-[#3b82f6] flex items-center justify-center text-white shadow-sm">
-            <Video className="w-4 h-4" />
+        <Link href="/" className="inline-block">
+          <div className="relative h-8 w-28">
+            <Image
+              src="/assets/jummp-logo.png"
+              alt="JUMMP"
+              fill
+              priority
+              className="object-contain object-left"
+            />
           </div>
-          <span className="text-2xl font-black tracking-tight text-[#00053d]">
-            JUMMP
-          </span>
         </Link>
         <Link
           href="/login"
