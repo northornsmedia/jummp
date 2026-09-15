@@ -141,7 +141,36 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 ...prev,
                 [participant.identity]: stream,
               }));
+            } else if (track.kind === Track.Kind.Audio) {
+              const audioEl = track.attach();
+              audioEl.id = `livekit-audio-${participant.identity}`;
+              document.body.appendChild(audioEl);
             }
+          });
+
+          room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+            if (track.kind === Track.Kind.Audio) {
+              track.detach().forEach((el) => el.remove());
+            }
+          });
+
+          room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
+            setParticipants((prev) => {
+              if (prev.some((p) => p.name === participant.identity)) return prev;
+              return [
+                ...prev,
+                {
+                  id: participant.sid,
+                  name: participant.identity,
+                  isHost: false,
+                  audioEnabled: true,
+                  videoEnabled: true,
+                  handRaised: false,
+                  isScreenSharing: false,
+                  joinedAt: Date.now(),
+                },
+              ];
+            });
           });
 
           room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
@@ -150,6 +179,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               delete next[participant.identity];
               return next;
             });
+            const audioEl = document.getElementById(`livekit-audio-${participant.identity}`);
+            if (audioEl) audioEl.remove();
           });
 
           await room.connect(data.url, data.token);
@@ -402,23 +433,31 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Toggle Camera
   const toggleCam = () => {
+    const nextState = !camEnabled;
     if (localStream) {
       const videoTracks = localStream.getVideoTracks();
-      videoTracks.forEach((t) => (t.enabled = !camEnabled));
-      setCamEnabled(!camEnabled);
+      videoTracks.forEach((t) => (t.enabled = nextState));
+      setCamEnabled(nextState);
     } else {
-      setCamEnabled(!camEnabled);
+      setCamEnabled(nextState);
+    }
+    if (livekitRoomRef.current) {
+      livekitRoomRef.current.localParticipant.setCameraEnabled(nextState).catch(() => {});
     }
   };
 
   // Toggle Mic
   const toggleMic = () => {
+    const nextState = !micEnabled;
     if (localStream) {
       const audioTracks = localStream.getAudioTracks();
-      audioTracks.forEach((t) => (t.enabled = !micEnabled));
-      setMicEnabled(!micEnabled);
+      audioTracks.forEach((t) => (t.enabled = nextState));
+      setMicEnabled(nextState);
     } else {
-      setMicEnabled(!micEnabled);
+      setMicEnabled(nextState);
+    }
+    if (livekitRoomRef.current) {
+      livekitRoomRef.current.localParticipant.setMicrophoneEnabled(nextState).catch(() => {});
     }
   };
 
@@ -430,6 +469,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         setScreenStream(null);
       }
       setIsScreenSharing(false);
+      if (livekitRoomRef.current) {
+        livekitRoomRef.current.localParticipant.setScreenShareEnabled(false).catch(() => {});
+      }
     } else {
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -440,9 +482,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         if (screenShareVideoRef.current) {
           screenShareVideoRef.current.srcObject = stream;
         }
+        if (livekitRoomRef.current) {
+          livekitRoomRef.current.localParticipant.setScreenShareEnabled(true).catch(() => {});
+        }
         stream.getVideoTracks()[0].onended = () => {
           setIsScreenSharing(false);
           setScreenStream(null);
+          if (livekitRoomRef.current) {
+            livekitRoomRef.current.localParticipant.setScreenShareEnabled(false).catch(() => {});
+          }
         };
       } catch (err) {
         console.log('Screen share cancelled or failed:', err);
