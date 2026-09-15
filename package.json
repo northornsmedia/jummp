@@ -9,8 +9,11 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.116.0",
     "canvas-confetti": "^1.9.4",
     "clsx": "^2.1.1",
+    "livekit-client": "^2.22.3",
+    "livekit-server-sdk": "^2.19.0",
     "lucide-react": "^0.475.0",
     "next": "14.2.24",
     "react": "^18.3.1",

@@ -1,3 +1,6 @@
+import { supabase } from '@/lib/supabaseClient';
+import type { RealtimeChannel } from '@supabase/supabase-js';
+
 export function generateMeetingId(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz';
   const pick = (len: number) =>
@@ -116,24 +119,52 @@ export function playChime(type: 'knock' | 'admit' | 'chat' = 'knock') {
   } catch {}
 }
 
-// Helper for cross-tab communication
+// Helper for cross-device and cross-tab communication (Supabase Realtime + BroadcastChannel)
 export class MeetChannel {
   private channel: BroadcastChannel | null = null;
+  private supabaseChannel: RealtimeChannel | null = null;
 
   constructor(private meetingId: string, private onMessage: (msg: any) => void) {
+    // 1. Browser BroadcastChannel for instant local sync
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       this.channel = new BroadcastChannel(`meet-${meetingId}`);
       this.channel.onmessage = (event) => {
         this.onMessage(event.data);
       };
     }
+
+    // 2. Supabase Realtime channel for internet-wide real-time messaging
+    try {
+      this.supabaseChannel = supabase
+        .channel(`meet:${meetingId}`)
+        .on('broadcast', { event: 'meet_event' }, ({ payload }) => {
+          this.onMessage(payload);
+        })
+        .subscribe();
+    } catch (e) {
+      console.warn('Supabase Realtime channel init error:', e);
+    }
   }
 
   send(type: string, payload: any) {
     const data = { type, payload, meetingId: this.meetingId };
+
+    // Broadcast locally
     if (this.channel) {
       this.channel.postMessage(data);
     }
+
+    // Broadcast globally across internet via Supabase WebSockets
+    if (this.supabaseChannel) {
+      this.supabaseChannel
+        .send({
+          type: 'broadcast',
+          event: 'meet_event',
+          payload: data,
+        })
+        .catch(() => {});
+    }
+
     // Also use localStorage for cross-window reliability
     try {
       localStorage.setItem(
@@ -147,6 +178,10 @@ export class MeetChannel {
     if (this.channel) {
       this.channel.close();
       this.channel = null;
+    }
+    if (this.supabaseChannel) {
+      supabase.removeChannel(this.supabaseChannel);
+      this.supabaseChannel = null;
     }
   }
 }

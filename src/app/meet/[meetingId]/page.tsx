@@ -37,6 +37,13 @@ import {
   getMeetingUrl,
   playChime,
 } from '@/lib/meetStore';
+import {
+  createOrGetMeeting,
+  saveChatMessage,
+  getMeetingMessages,
+  DBMeeting,
+} from '@/lib/supabaseClient';
+import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track } from 'livekit-client';
 
 function MeetContent({ params }: { params: { meetingId: string } }) {
   const { meetingId } = params;
@@ -83,8 +90,91 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [copied, setCopied] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);
 
+  const [dbMeeting, setDbMeeting] = useState<DBMeeting | null>(null);
+  const livekitRoomRef = useRef<Room | null>(null);
+
   const channelRef = useRef<MeetChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+
+  // Initialize Supabase meeting record and load past messages
+  useEffect(() => {
+    async function initSupabase() {
+      const meeting = await createOrGetMeeting(meetingId, isHostQuery ? 'Host' : 'Guest');
+      if (meeting) {
+        setDbMeeting(meeting);
+        const messages = await getMeetingMessages(meeting.id);
+        if (messages && messages.length > 0) {
+          setChatMessages(
+            messages.map((m) => ({
+              id: m.id,
+              sender: m.sender_name,
+              text: m.content,
+              time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            }))
+          );
+        }
+      }
+    }
+    initSupabase();
+  }, [meetingId, isHostQuery]);
+
+  // Connect to LiveKit Cloud SFU if configured when call starts
+  useEffect(() => {
+    if (!inCall) return;
+
+    async function connectLiveKit() {
+      try {
+        const name = userName || (isHost ? 'Host' : 'Guest');
+        const res = await fetch(`/api/livekit/token?room=${meetingId}&username=${encodeURIComponent(name)}`);
+        const data = await res.json();
+        if (data.configured && data.token && data.url) {
+          const room = new Room({
+            adaptiveStream: true,
+            dynacast: true,
+          });
+          livekitRoomRef.current = room;
+
+          room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub, participant: RemoteParticipant) => {
+            if (track.kind === Track.Kind.Video) {
+              const stream = new MediaStream([track.mediaStreamTrack]);
+              setRemoteStreams((prev) => ({
+                ...prev,
+                [participant.identity]: stream,
+              }));
+            }
+          });
+
+          room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
+            setRemoteStreams((prev) => {
+              const next = { ...prev };
+              delete next[participant.identity];
+              return next;
+            });
+          });
+
+          await room.connect(data.url, data.token);
+
+          if (localStreamRef.current) {
+            const videoTrack = localStreamRef.current.getVideoTracks()[0];
+            const audioTrack = localStreamRef.current.getAudioTracks()[0];
+            if (videoTrack) await room.localParticipant.publishTrack(videoTrack);
+            if (audioTrack) await room.localParticipant.publishTrack(audioTrack);
+          }
+        }
+      } catch (e) {
+        console.warn('LiveKit SFU connection error, using P2P fallback:', e);
+      }
+    }
+
+    connectLiveKit();
+
+    return () => {
+      if (livekitRoomRef.current) {
+        livekitRoomRef.current.disconnect();
+        livekitRoomRef.current = null;
+      }
+    };
+  }, [inCall, meetingId, userName, isHost]);
 
   // Keep localStreamRef synced
   useEffect(() => {
@@ -442,6 +532,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     };
     setChatMessages((prev) => [...prev, msg]);
     channelRef.current?.send('CHAT_MESSAGE', msg);
+    if (dbMeeting) {
+      saveChatMessage(dbMeeting.id, userName || 'You', newChatText.trim());
+    }
     setNewChatText('');
   };
 
