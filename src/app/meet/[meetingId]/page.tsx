@@ -31,7 +31,6 @@ import {
   Sparkles,
   RotateCcw,
   Home,
-  SwitchCamera,
   Play,
   RefreshCw,
   Clock,
@@ -99,7 +98,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [activeScreenSharer, setActiveScreenSharer] = useState<string | null>(null);
   const [screenShareError, setScreenShareError] = useState<string | null>(null);
   const [handRaised, setHandRaised] = useState(false);
-  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [audioVolume, setAudioVolume] = useState(0); // 0-100 live voice volume
   const [isResyncing, setIsResyncing] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
@@ -549,12 +547,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // 4. ACQUIRE LOCAL MEDIA (Camera & Mic)
   // =========================================================================
   const acquireMedia = useCallback(
-    async (mode: 'user' | 'environment' = facingMode) => {
+    async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: camEnabled
             ? {
-                facingMode: mode,
+                facingMode: 'user',
                 width: { ideal: 1280 },
                 height: { ideal: 720 },
               }
@@ -590,13 +588,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         return null;
       }
     },
-    [camEnabled, micEnabled, facingMode]
+    [camEnabled, micEnabled]
   );
 
   // Initialize camera & mic in Lobby
   useEffect(() => {
     if (!inCall && !hasLeft && !statusCheck?.isExpired) {
-      acquireMedia(facingMode);
+      acquireMedia();
     }
 
     return () => {
@@ -604,7 +602,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [acquireMedia, facingMode, inCall, hasLeft, statusCheck?.isExpired]);
+  }, [acquireMedia, inCall, hasLeft, statusCheck?.isExpired]);
 
   // =========================================================================
   // 5. RESILIENT MOBILE APP-SWITCHING / BACKGROUND FREEZE RECOVERY ENGINE
@@ -651,7 +649,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         if (hasDeadTrack && (camEnabled || micEnabled)) {
           console.log('Re-acquiring dead media tracks after background return...');
           try {
-            const freshStream = await acquireMedia(facingMode);
+            const freshStream = await acquireMedia();
             if (freshStream) {
               if (inCallVideoRef.current) {
                 inCallVideoRef.current.srcObject = freshStream;
@@ -757,7 +755,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       window.removeEventListener('pageshow', handleForegroundReturn);
       window.removeEventListener('focus', handleForegroundReturn);
     };
-  }, [acquireMedia, camEnabled, micEnabled, facingMode, inCall, userName, isHost, meetingId]);
+  }, [acquireMedia, camEnabled, micEnabled, inCall, userName, isHost, meetingId]);
 
   // One-tap resume if browser blocked autoplay upon returning
   const handleUserGestureResume = () => {
@@ -765,20 +763,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     document.querySelectorAll('video').forEach((v) => {
       v.play().catch(() => {});
     });
-    acquireMedia(facingMode);
-  };
-
-  // Flip Camera (Front / Rear) for Mobile devices
-  const switchCamera = async () => {
-    triggerHaptic('medium');
-    const nextMode = facingMode === 'user' ? 'environment' : 'user';
-    setFacingMode(nextMode);
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getVideoTracks().forEach((t) => t.stop());
-    }
-
-    await acquireMedia(nextMode);
+    acquireMedia();
   };
 
   // =========================================================================
@@ -1651,7 +1636,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         message: 'Meeting room reopened and ready.',
       });
       setIsCheckingStatus(false);
-      acquireMedia(facingMode);
+      acquireMedia();
     }
   };
 
@@ -1830,7 +1815,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 setInCall(false);
                 setWaitingToJoin(false);
                 setDenied(false);
-                acquireMedia(facingMode);
+                acquireMedia();
               }}
               className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
             >
@@ -1875,14 +1860,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={switchCamera}
-              className="p-2 sm:p-2.5 rounded-xl bg-slate-900/90 border border-slate-800 hover:bg-slate-800 text-slate-300 hover:text-white transition-all active:rotate-180"
-              title="Flip camera (front / back)"
-            >
-              <SwitchCamera className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
               onClick={copyMeetingLink}
               className="text-xs font-mono text-slate-400 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-800 hover:border-blue-500/40 hover:text-white transition-colors flex items-center gap-1.5"
             >
@@ -1903,7 +1880,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   autoPlay
                   playsInline
                   muted
-                  className={`w-full h-full object-cover ${facingMode === 'user' ? 'transform -scale-x-100' : ''}`}
+                  className="w-full h-full object-cover transform -scale-x-100"
                 />
               ) : (
                 <div className="flex flex-col items-center justify-center text-slate-400 space-y-3">
@@ -1953,15 +1930,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   title={camEnabled ? 'Turn off camera' : 'Turn on camera'}
                 >
                   {camEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={switchCamera}
-                  className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white transition-all active:scale-95"
-                  title="Flip camera (front / back)"
-                >
-                  <SwitchCamera className="w-5 h-5" />
                 </button>
               </div>
             </div>
@@ -2167,15 +2135,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </div>
 
         <div className="flex items-center gap-2 text-xs text-slate-400">
-          <button
-            type="button"
-            onClick={switchCamera}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
-            title="Switch front/back camera"
-          >
-            <SwitchCamera className="w-4 h-4" />
-          </button>
-          <span className="font-mono hidden sm:inline">
+          <span className="font-mono">
             {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
