@@ -51,6 +51,7 @@ import {
   Plus,
   QrCode,
   Share2,
+  Link2,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import {
@@ -2820,11 +2821,54 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         return;
       }
 
+      if (
+        typeof navigator === 'undefined' ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getDisplayMedia !== 'function'
+      ) {
+        showToast(
+          'Screen Share Unavailable',
+          'Your browser does not support screen sharing. On mobile, please use Google Chrome.',
+          'info'
+        );
+        return;
+      }
+
+      const isMobileDevice =
+        typeof navigator !== 'undefined' &&
+        /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(
+          navigator.userAgent || ''
+        );
+
+      let stream: MediaStream;
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true,
-        } as any);
+        if (isMobileDevice) {
+          // Mobile browsers (Chrome Android / iOS Safari) strictly reject getDisplayMedia when audio: true is requested
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+          });
+        } else {
+          try {
+            stream = await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+              audio: true,
+            } as any);
+          } catch (audioErr: any) {
+            // Fallback to video only if audio capture is not supported or rejected
+            if (
+              audioErr?.name === 'NotSupportedError' ||
+              audioErr?.name === 'TypeError' ||
+              audioErr?.name === 'OverconstrainedError'
+            ) {
+              stream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+              });
+            } else {
+              throw audioErr;
+            }
+          }
+        }
+
         setScreenStream(stream);
         localScreenStreamRef.current = stream;
         setIsScreenSharing(true);
@@ -2833,7 +2877,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
         const screenTrack = stream.getVideoTracks()[0];
         if (screenTrack) {
-          (screenTrack as any).contentHint = 'detail';
+          try {
+            (screenTrack as any).contentHint = 'detail';
+          } catch (e) {}
         }
         const screenStreamId = stream.id;
         const screenTrackId = screenTrack?.id;
@@ -2870,14 +2916,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         });
 
         if (livekitRoomRef.current && screenTrack) {
-          await livekitRoomRef.current.localParticipant.publishTrack(screenTrack, {
-            source: Track.Source.ScreenShare,
-          });
-          const screenAudioTrack = stream.getAudioTracks()[0];
-          if (screenAudioTrack) {
-            await livekitRoomRef.current.localParticipant.publishTrack(screenAudioTrack, {
-              source: Track.Source.ScreenShareAudio,
+          try {
+            await livekitRoomRef.current.localParticipant.publishTrack(screenTrack, {
+              source: Track.Source.ScreenShare,
             });
+            const screenAudioTrack = stream.getAudioTracks()[0];
+            if (screenAudioTrack) {
+              await livekitRoomRef.current.localParticipant.publishTrack(screenAudioTrack, {
+                source: Track.Source.ScreenShareAudio,
+              });
+            }
+          } catch (lkErr) {
+            console.warn('LiveKit track publish warning:', lkErr);
           }
         }
 
@@ -2927,8 +2977,17 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             }
           };
         }
-      } catch (err) {
-        console.log('Screen share cancelled or failed:', err);
+      } catch (err: any) {
+        if (err?.name === 'NotAllowedError' || err?.name === 'AbortError') {
+          console.log('Screen share cancelled by user');
+          return;
+        }
+        console.error('Screen share failed:', err);
+        showToast(
+          'Screen Share Failed',
+          err?.message || 'Could not start screen sharing on this device',
+          'info'
+        );
       }
     }
   };
@@ -3957,45 +4016,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
       {/* TOP IN-CALL BAR */}
       <header className="h-12 sm:h-14 bg-slate-900/90 backdrop-blur-md border-b border-slate-800/80 px-3 sm:px-4 flex items-center justify-between shrink-0 z-30 pt-safe">
-        <div className="flex items-center gap-2.5">
+        {/* Left: JUMMP Logo & Host Badge */}
+        <div className="flex items-center gap-2 sm:gap-2.5">
           <Link href="/" className="relative h-6 w-20">
             <Image src="/assets/jummp-logo.png" alt="JUMMP" fill priority className="object-contain object-left" />
           </Link>
-          <span className="text-slate-700 hidden sm:inline">•</span>
-          <button
-            type="button"
-            onClick={copyMeetingLink}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-xs font-mono text-slate-300 transition-colors"
-            title="Tap to copy link"
-          >
-            <span>{meetingId}</span>
-            {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-slate-500" />}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              triggerHaptic('light');
-              setShowQrModal(true);
-            }}
-            className="flex items-center gap-1 px-2 py-1 rounded-xl bg-slate-800/80 hover:bg-blue-600/20 hover:text-blue-400 text-xs text-slate-400 transition-colors"
-            title="Show QR Code"
-          >
-            <QrCode className="w-3.5 h-3.5" />
-            <span className="hidden md:inline text-[10px] font-medium">QR</span>
-          </button>
           {isHost && (
-            <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30">
+            <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30 hidden sm:inline">
               Host
             </span>
           )}
 
           {/* Active Recording Indicator: Host sees controls, Guests see notification badge */}
           {(isRecording || isRoomRecording) && (
-            <div className="flex items-center gap-1.5 sm:gap-2 bg-red-950/80 border border-red-500/40 text-red-300 px-2.5 py-1 rounded-xl shadow-md text-xs animate-in fade-in">
+            <div className="flex items-center gap-1.5 sm:gap-2 bg-red-950/80 border border-red-500/40 text-red-300 px-2 sm:px-2.5 py-1 rounded-xl shadow-md text-xs animate-in fade-in">
               <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               {isHost && isRecording ? (
                 <>
-                  <span className="font-mono font-bold tracking-wider text-[11px] sm:text-xs">
+                  <span className="font-mono font-bold tracking-wider text-[10px] sm:text-xs">
                     REC {isPausedRecording ? '(PAUSED)' : formatTimer(recordingSeconds)}
                   </span>
                   {isPausedRecording ? (
@@ -4027,30 +4065,69 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   </button>
                 </>
               ) : (
-                <span className="font-bold tracking-wider text-[11px] sm:text-xs">
-                  REC • {recordingBy} is recording
+                <span className="font-bold tracking-wider text-[10px] sm:text-xs truncate max-w-[100px] sm:max-w-none">
+                  REC • {recordingBy}
                 </span>
               )}
             </div>
           )}
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-slate-400">
+        {/* Center: "Link" Button (opens modal having QR and link) */}
+        <div className="flex items-center justify-center">
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic('light');
+              setShowQrModal(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 active:scale-95 border border-slate-700/80 text-xs font-semibold text-slate-200 hover:text-white shadow-sm transition-all"
+            title="Meeting Link & QR Code"
+          >
+            <Link2 className="w-3.5 h-3.5 text-blue-400" />
+            <span>Link</span>
+          </button>
+        </div>
+
+        {/* Right: People Icon and Notes Icon */}
+        <div className="flex items-center gap-1.5 sm:gap-2 text-xs text-slate-400">
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic('light');
+              setActivePanel(activePanel === 'people' ? null : 'people');
+            }}
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all relative ${
+              activePanel === 'people'
+                ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/30 ring-2 ring-blue-400/40'
+                : 'bg-slate-800/90 hover:bg-slate-700 border-slate-700/80 text-slate-200 hover:text-white shadow-sm'
+            }`}
+            title={`People (${1 + otherParticipants.length})`}
+          >
+            <Users className={`w-3.5 h-3.5 ${activePanel === 'people' ? 'text-white' : 'text-blue-400'}`} />
+            <span className="font-mono font-bold text-[11px] sm:text-xs">
+              {1 + otherParticipants.length}
+            </span>
+            {pendingRequests.length > 0 && isHost && (
+              <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+            )}
+          </button>
+
           <button
             type="button"
             onClick={() => {
               triggerHaptic('light');
               setActivePanel(activePanel === 'notes' ? null : 'notes');
             }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all ${
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all ${
               activePanel === 'notes'
                 ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/30 ring-2 ring-blue-400/40'
-                : 'bg-slate-800/90 hover:bg-slate-700 border-slate-700 text-slate-200 hover:text-white shadow-sm'
+                : 'bg-slate-800/90 hover:bg-slate-700 border-slate-700/80 text-slate-200 hover:text-white shadow-sm'
             }`}
             title="Open Live Notes & Transcripts"
           >
             <FileText className={`w-3.5 h-3.5 ${activePanel === 'notes' ? 'text-white' : 'text-blue-400'}`} />
-            <span>Notes</span>
+            <span className="hidden sm:inline">Notes</span>
             {meetingNotes.length > 1 && (
               <span className="px-1.5 py-0.2 rounded-full bg-blue-500/25 text-[10px] font-mono font-bold text-blue-300">
                 {meetingNotes.length - 1}
@@ -4058,7 +4135,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             )}
           </button>
 
-          <span className="font-mono ml-1 text-slate-400">
+          <span className="font-mono ml-1 text-slate-400 text-xs hidden md:inline">
             {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
@@ -5793,28 +5870,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           </div>
         </div>
 
-        {/* Right Action Icons (Info / People / Chat) */}
+        {/* Right Action Icons (People / Chat / Notes) */}
         <div className="flex items-center gap-1 sm:gap-2">
-          <div className="relative group">
-            <button
-              type="button"
-              onClick={() => {
-                triggerHaptic('light');
-                setActivePanel(activePanel === 'info' ? null : 'info');
-              }}
-              className={`p-2.5 rounded-xl transition-colors ${
-                activePanel === 'info'
-                  ? 'bg-blue-600 text-white'
-                  : 'hover:bg-slate-800 text-slate-400 hover:text-white'
-              }`}
-            >
-              <Info className="w-5 h-5" />
-            </button>
-            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
-              Meeting details
-            </span>
-          </div>
-
           <div className="relative group">
             <button
               type="button"
