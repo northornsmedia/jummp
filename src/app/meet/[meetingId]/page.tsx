@@ -52,6 +52,7 @@ import {
   QrCode,
   Share2,
   Link2,
+  PictureInPicture2,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import {
@@ -178,6 +179,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
   const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
   const localScreenStreamRef = useRef<MediaStream | null>(null);
+  const [isPiPActive, setIsPiPActive] = useState(false);
+  const pipWindowRef = useRef<any>(null);
   const remoteScreenTrackIdRef = useRef<string | null>(null);
   const remoteScreenStreamIdRef = useRef<string | null>(null);
   const activeScreenSharerRef = useRef<string | null>(null);
@@ -2766,6 +2769,180 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     });
   };
 
+  // =========================================================================
+  // GOOGLE MEET STYLE PICTURE-IN-PICTURE (COMPACT FLOATING WINDOW)
+  // =========================================================================
+  const togglePictureInPicture = async () => {
+    try {
+      // 1. If PiP Window already open, close it
+      if (pipWindowRef.current && !pipWindowRef.current.closed) {
+        pipWindowRef.current.close();
+        pipWindowRef.current = null;
+        setIsPiPActive(false);
+        return;
+      }
+
+      if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPiPActive(false);
+        return;
+      }
+
+      // 2. Chrome / Edge Document Picture-in-Picture API
+      if (typeof window !== 'undefined' && 'documentPictureInPicture' in window) {
+        try {
+          const pipWindow = await (window as any).documentPictureInPicture.requestWindow({
+            width: 380,
+            height: 260,
+          });
+          pipWindowRef.current = pipWindow;
+          setIsPiPActive(true);
+
+          // Copy stylesheets
+          [...document.styleSheets].forEach((sheet) => {
+            try {
+              const cssRules = [...sheet.cssRules].map((r) => r.cssText).join('');
+              const style = pipWindow.document.createElement('style');
+              style.textContent = cssRules;
+              pipWindow.document.head.appendChild(style);
+            } catch {
+              const link = pipWindow.document.createElement('link');
+              link.rel = 'stylesheet';
+              link.type = sheet.type;
+              link.href = sheet.href;
+              pipWindow.document.head.appendChild(link);
+            }
+          });
+
+          pipWindow.document.body.style.cssText =
+            'margin:0;padding:0;background:#0b0f19;color:white;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;display:flex;flex-direction:column;height:100vh;user-select:none;';
+
+          const wrapper = pipWindow.document.createElement('div');
+          wrapper.style.cssText =
+            'width:100%;height:100%;display:flex;flex-direction:column;justify-content:space-between;position:relative;background:#0b0f19;';
+
+          // Top Header Bar
+          const header = pipWindow.document.createElement('div');
+          header.style.cssText =
+            'display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(15,23,42,0.95);border-bottom:1px solid rgba(255,255,255,0.08);font-size:11px;font-weight:600;z-index:10;';
+          header.innerHTML = `
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="width:7px;height:7px;border-radius:50%;background:#3b82f6;box-shadow:0 0 6px #3b82f6;"></span>
+              <span style="font-weight:700;letter-spacing:-0.01em;">JUMMP Meet</span>
+            </div>
+            <button id="pip-back-btn" style="background:rgba(255,255,255,0.12);border:none;color:#cbd5e1;font-size:10px;padding:3px 8px;border-radius:6px;cursor:pointer;">Back to tab</button>
+          `;
+          wrapper.appendChild(header);
+
+          // Video Box
+          const videoBox = pipWindow.document.createElement('div');
+          videoBox.style.cssText =
+            'flex:1;min-height:0;background:#000;position:relative;display:flex;align-items:center;justify-content:center;';
+
+          const pipVideo = pipWindow.document.createElement('video');
+          pipVideo.autoplay = true;
+          pipVideo.playsInline = true;
+          pipVideo.muted = true;
+          pipVideo.style.cssText =
+            'width:100%;height:100%;object-fit:contain;background:#000;';
+
+          const targetStream =
+            localScreenStreamRef.current ||
+            screenStream ||
+            remoteScreenStream ||
+            (participants.find((p) => p.stream)?.stream) ||
+            localStreamRef.current;
+
+          if (targetStream) {
+            pipVideo.srcObject = targetStream;
+            pipVideo.play().catch(() => {});
+          }
+          videoBox.appendChild(pipVideo);
+
+          const badge = pipWindow.document.createElement('div');
+          badge.style.cssText =
+            'position:absolute;bottom:8px;left:8px;background:rgba(0,0,0,0.75);padding:2px 8px;border-radius:6px;font-size:9px;color:#93c5fd;border:1px solid rgba(59,130,246,0.3);';
+          badge.textContent = localScreenStreamRef.current ? 'Sharing Screen' : (userName || 'Meeting');
+          videoBox.appendChild(badge);
+
+          wrapper.appendChild(videoBox);
+
+          // Bottom Bar (Quick Actions)
+          const controls = pipWindow.document.createElement('div');
+          controls.style.cssText =
+            'display:flex;align-items:center;justify-content:center;gap:8px;padding:8px 12px;background:rgba(15,23,42,0.95);border-top:1px solid rgba(255,255,255,0.08);';
+
+          if (localScreenStreamRef.current || isScreenSharing) {
+            const stopShareBtn = pipWindow.document.createElement('button');
+            stopShareBtn.style.cssText =
+              'background:#dc2626;color:white;border:none;padding:5px 12px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;';
+            stopShareBtn.textContent = 'Stop presenting';
+            stopShareBtn.onclick = () => {
+              toggleScreenShare();
+              pipWindow.close();
+            };
+            controls.appendChild(stopShareBtn);
+          }
+
+          wrapper.appendChild(controls);
+          pipWindow.document.body.appendChild(wrapper);
+
+          // Back to tab button
+          const backBtn = pipWindow.document.getElementById('pip-back-btn');
+          if (backBtn) {
+            backBtn.onclick = () => {
+              window.focus();
+              pipWindow.close();
+            };
+          }
+
+          pipWindow.addEventListener('pagehide', () => {
+            pipWindowRef.current = null;
+            setIsPiPActive(false);
+          });
+
+          return;
+        } catch (pipErr) {
+          console.warn('Document Picture-in-Picture request failed, attempting standard video PiP:', pipErr);
+        }
+      }
+
+      // 3. Fallback: Standard HTML5 video Picture-in-Picture
+      const targetVideo =
+        screenShareVideoRef.current ||
+        remoteScreenVideoRef.current ||
+        inCallVideoRef.current ||
+        (document.querySelector('video') as HTMLVideoElement | null);
+
+      if (targetVideo && 'requestPictureInPicture' in targetVideo) {
+        await targetVideo.requestPictureInPicture();
+        setIsPiPActive(true);
+      }
+    } catch (err) {
+      console.warn('Failed to open Picture-in-Picture:', err);
+    }
+  };
+
+  // Auto Picture-in-Picture when opening or switching to other tabs
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'hidden') {
+        if (inCall && (isScreenSharing || localScreenStreamRef.current || remoteScreenStream)) {
+          if (!pipWindowRef.current || pipWindowRef.current.closed) {
+            try {
+              togglePictureInPicture();
+            } catch {}
+          }
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [inCall, isScreenSharing, remoteScreenStream]);
+
   // Screen Sharing
   const toggleScreenShare = async () => {
     const myName = userName || (isHost ? 'Host' : 'Guest');
@@ -2784,6 +2961,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       setIsScreenSharing(false);
       setShowScreenPreview(false);
       setActiveScreenSharer(null);
+      if (pipWindowRef.current && !pipWindowRef.current.closed) {
+        try {
+          pipWindowRef.current.close();
+        } catch {}
+        pipWindowRef.current = null;
+      }
+      if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+        try {
+          document.exitPictureInPicture().catch(() => {});
+        } catch {}
+      }
+      setIsPiPActive(false);
 
       // Remove screen senders from all peer connections and renegotiate
       Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
@@ -2872,8 +3061,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         setScreenStream(stream);
         localScreenStreamRef.current = stream;
         setIsScreenSharing(true);
-        setShowScreenPreview(false);
+        setShowScreenPreview(true);
         setActiveScreenSharer(myName);
+
+        // Auto-open floating mini window so presenter can see meeting when switching to other tabs
+        setTimeout(() => {
+          if (!pipWindowRef.current || pipWindowRef.current.closed) {
+            togglePictureInPicture().catch(() => {});
+          }
+        }, 300);
 
         const screenTrack = stream.getVideoTracks()[0];
         if (screenTrack) {
@@ -2947,6 +3143,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             setIsScreenSharing(false);
             setShowScreenPreview(false);
             setActiveScreenSharer(null);
+            if (pipWindowRef.current && !pipWindowRef.current.closed) {
+              try {
+                pipWindowRef.current.close();
+              } catch {}
+                pipWindowRef.current = null;
+            }
+            if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+              try {
+                document.exitPictureInPicture().catch(() => {});
+              } catch {}
+            }
+            setIsPiPActive(false);
 
             Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
               try {
@@ -3422,6 +3630,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const handleLeaveCall = () => {
     triggerHaptic('heavy');
     playChime('leave');
+    if (pipWindowRef.current && !pipWindowRef.current.closed) {
+      try {
+        pipWindowRef.current.close();
+      } catch {}
+      pipWindowRef.current = null;
+    }
+    if (typeof document !== 'undefined' && document.pictureInPictureElement) {
+      try {
+        document.exitPictureInPicture().catch(() => {});
+      } catch {}
+    }
+    setIsPiPActive(false);
     const myName = userName || (isHost ? 'Host' : 'Guest');
     if (channelRef.current) {
       channelRef.current.send('USER_LEFT', { name: myName, id: participantId });
@@ -4274,53 +4494,58 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               {/* Left/Center Stage: Screen Presentation */}
               <div className="flex-1 w-full min-h-0 lg:h-full bg-slate-950 rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
                 {activeScreenSharer === (userName || (isHost ? 'Host' : 'Guest')) ? (
-                  /* THIS USER IS THE PRESENTER - Google Meet Presenter Stage with Small Preview Window */
-                  <div className="relative w-full h-full flex flex-col items-center justify-center text-center p-3 sm:p-6 space-y-4 animate-in fade-in duration-200">
+                  /* THIS USER IS THE PRESENTER - Full Big Screen Presentation Stage */
+                  <div className="relative w-full h-full flex items-center justify-center bg-black group">
+                    <video
+                      ref={(el) => {
+                        screenShareVideoRef.current = el;
+                        if (el && screenStream && el.srcObject !== screenStream) {
+                          el.srcObject = screenStream;
+                          el.play().catch(() => {});
+                        }
+                      }}
+                      autoPlay
+                      playsInline
+                      muted
+                      // @ts-ignore
+                      autoPictureInPicture="true"
+                      className="w-full h-full object-contain bg-black"
+                    />
+
                     {/* Top Overlay Bar */}
-                    <div className="w-full flex items-center justify-between gap-2 px-2 sm:px-4">
-                      <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2">
+                    <div className="absolute top-2 sm:top-3 left-2 sm:left-3 right-2 sm:right-3 flex items-center justify-between gap-2 pointer-events-none z-20">
+                      <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
                         <MonitorUp className="w-4 h-4 text-blue-400" />
-                        <span>You are presenting to everyone</span>
+                        <span className="hidden sm:inline">You are presenting to everyone</span>
+                        <span className="sm:hidden">Presenting</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={toggleScreenShare}
-                        className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
-                      >
-                        <Square className="w-3 h-3 fill-current" />
-                        <span>Stop presenting</span>
-                      </button>
-                    </div>
-
-                    {/* Google Meet Small Preview Window */}
-                    <div className="relative w-full max-w-sm sm:max-w-md aspect-video rounded-2xl sm:rounded-3xl bg-black border-2 border-blue-500/60 shadow-2xl shadow-blue-500/20 overflow-hidden group">
-                      <video
-                        ref={(el) => {
-                          screenShareVideoRef.current = el;
-                          if (el && screenStream && el.srcObject !== screenStream) {
-                            el.srcObject = screenStream;
-                            el.play().catch(() => {});
-                          }
-                        }}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="w-full h-full object-contain bg-black"
-                      />
-                      <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl text-[10px] font-bold text-blue-400 border border-blue-500/30">
-                        <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
-                        <span>Your Screen (Live Preview)</span>
+                      <div className="flex items-center gap-2 pointer-events-auto">
+                        {/* Google Meet Style Floating Mini Window Button */}
+                        <button
+                          type="button"
+                          onClick={togglePictureInPicture}
+                          className="bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white text-xs font-semibold px-3 py-1.5 rounded-xl shadow-md border border-white/10 transition-all active:scale-95 flex items-center gap-1.5"
+                          title="Open floating mini window to keep meeting visible when opening other tabs"
+                        >
+                          <PictureInPicture2 className="w-3.5 h-3.5 text-blue-400" />
+                          <span className="hidden md:inline">Floating Mini Window</span>
+                          <span className="md:hidden">PiP</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={toggleScreenShare}
+                          className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
+                        >
+                          <Square className="w-3 h-3 fill-current" />
+                          <span>Stop presenting</span>
+                        </button>
                       </div>
                     </div>
 
-                    {/* Presentation Status Description */}
-                    <div className="space-y-1 max-w-sm">
-                      <h4 className="text-sm sm:text-base font-bold text-white">
-                        Your screen is visible to all participants
-                      </h4>
-                      <p className="text-[11px] sm:text-xs text-slate-400">
-                        You are sharing your screen. Other participants see your presentation in full view.
-                      </p>
+                    {/* Subtle Hint for Other Tabs */}
+                    <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-slate-950/85 backdrop-blur-md px-4 py-1.5 rounded-full border border-white/10 text-[11px] text-slate-300 shadow-xl opacity-0 group-hover:opacity-100 sm:opacity-90 transition-opacity pointer-events-none flex items-center gap-2">
+                      <PictureInPicture2 className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      <span>Opening other tabs? Click <strong>Floating Mini Window</strong> to keep meeting visible over other tabs</span>
                     </div>
                   </div>
                 ) : (
@@ -5755,6 +5980,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </button>
             <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
               {isScreenSharing ? 'Stop presenting' : 'Present screen'}
+            </span>
+          </div>
+
+          {/* Picture-in-Picture Floating Window (Google Meet Style) */}
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={togglePictureInPicture}
+              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                isPiPActive
+                  ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-500/30'
+                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border-white/10'
+              }`}
+            >
+              <PictureInPicture2 className="w-5 h-5" />
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              {isPiPActive ? 'Exit floating window' : 'Floating mini window (for other tabs)'}
             </span>
           </div>
 
