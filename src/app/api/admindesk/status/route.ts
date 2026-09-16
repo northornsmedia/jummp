@@ -82,6 +82,7 @@ export async function GET(req: NextRequest) {
     totalParticipants: 0,
     totalMessages: 0,
     totalBurnedMinutes: 0,
+    totalParticipantStreamingMinutes: 0,
     recentMeetings: [] as any[],
   };
 
@@ -111,9 +112,9 @@ export async function GET(req: NextRequest) {
           message: `Database error: ${meetErr.message}`,
         });
       } else {
-        // Query participants & messages counts
-        const [{ count: partCount }, { count: msgCount }] = await Promise.all([
-          supabase.from('meeting_participants').select('count', { count: 'exact', head: true }),
+        // Query participants details & messages count
+        const [{ data: participantsData, count: partCount }, { count: msgCount }] = await Promise.all([
+          supabase.from('meeting_participants').select('id, meeting_id, name, joined_at, last_seen_at', { count: 'exact' }),
           supabase.from('meeting_messages').select('count', { count: 'exact', head: true }),
         ]);
 
@@ -138,19 +139,49 @@ export async function GET(req: NextRequest) {
           }
         });
 
+        // Group participants by meeting and compute actual streaming minutes
+        const partMap = new Map<string, any[]>();
+        let totalParticipantStreamingMinutes = 0;
+        (participantsData || []).forEach((p) => {
+          const list = partMap.get(p.meeting_id) || [];
+          list.push(p);
+          partMap.set(p.meeting_id, list);
+
+          const joined = new Date(p.joined_at).getTime();
+          const lastSeen = new Date(p.last_seen_at || p.joined_at).getTime();
+          const diffMs = Math.max(0, lastSeen - joined);
+          const pMins = Math.max(0.1, Math.round((diffMs / 60000) * 10) / 10);
+          totalParticipantStreamingMinutes += pMins;
+        });
+
         let totalBurnedMinutes = 0;
         const enrichedMeetings = allMeetings.map((m) => {
-          const createdMs = new Date(m.created_at).getTime();
-          let burnedMinutes = 1;
+          const parts = partMap.get(m.id) || [];
+          let burnedMinutes = 0;
+
           if (m.status === 'active') {
-            burnedMinutes = Math.max(1, Math.round(((nowMs - createdMs) / 60000) * 10) / 10);
+            const durMs = Math.max(0, nowMs - new Date(m.created_at).getTime());
+            burnedMinutes = Math.max(1, Math.round((durMs / 60000) * 10) / 10);
+          } else if (parts.length > 0) {
+            // Real wall-clock span of the call from actual participant presence
+            const joinTimes = parts.map((p) => new Date(p.joined_at).getTime());
+            const leaveTimes = parts.map((p) => new Date(p.last_seen_at || p.joined_at).getTime());
+            const start = Math.min(...joinTimes);
+            const end = Math.max(...leaveTimes);
+            const diffMs = Math.max(0, end - start);
+            burnedMinutes = Math.max(0.5, Math.round((diffMs / 60000) * 10) / 10);
           } else {
-            const endMs = new Date(m.ended_at || m.last_activity_at || m.updated_at || m.created_at).getTime();
-            burnedMinutes = Math.max(1, Math.round(((endMs - createdMs) / 60000) * 10) / 10);
+            // Meeting was created but no guest/host entered
+            const createdMs = new Date(m.created_at).getTime();
+            const lastAct = new Date(m.last_activity_at || m.created_at).getTime();
+            const diff = lastAct - createdMs;
+            burnedMinutes = diff > 60000 ? Math.min(5, Math.round((diff / 60000) * 10) / 10) : 0;
           }
+
           totalBurnedMinutes += burnedMinutes;
           return {
             ...m,
+            active_participants_count: parts.length,
             burnedMinutes,
           };
         });
@@ -162,7 +193,8 @@ export async function GET(req: NextRequest) {
           endedMeetings: endedCount,
           totalParticipants: partCount || 0,
           totalMessages: msgCount || 0,
-          totalBurnedMinutes: Math.round(totalBurnedMinutes),
+          totalBurnedMinutes: Math.round(totalBurnedMinutes * 10) / 10,
+          totalParticipantStreamingMinutes: Math.round(totalParticipantStreamingMinutes * 10) / 10,
           recentMeetings: enrichedMeetings.slice(0, 50),
         };
 
@@ -332,20 +364,20 @@ export async function GET(req: NextRequest) {
 
   // LiveKit Cloud Monthly Egress / Minutes:
   // Free tier: 100,000 participant minutes / month or 1000 GB egress
-  const estMinutesUsed = supabaseStats.totalMeetings * 15; // approximate 15 mins per meeting
+  const actualStreamingMins = supabaseStats.totalParticipantStreamingMinutes || 0;
   const minutesLimit = 100000;
-  const minutesPct = Math.min(100, Number(((estMinutesUsed / minutesLimit) * 100).toFixed(2)));
+  const minutesPct = Math.min(100, Number(((actualStreamingMins / minutesLimit) * 100).toFixed(2)));
 
   limits.push({
     name: 'Participant Streaming Minutes',
     provider: 'LiveKit Cloud',
-    used: estMinutesUsed,
+    used: actualStreamingMins,
     limit: minutesLimit,
     unit: 'mins/mo',
     percentage: Math.max(0.1, minutesPct),
     tier: 'Developer (Free)',
     status: minutesPct > 80 ? 'warning' : 'safe',
-    notes: 'Free tier grants 100,000 participant minutes / month across all calls.',
+    notes: 'Measured from true participant session durations across all completed & active calls.',
   });
 
   // Overall system status
