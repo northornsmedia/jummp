@@ -214,7 +214,7 @@ export async function endMeeting(meetingId: string): Promise<void> {
   } catch {}
 }
 
-// 4. Add or update participant
+// 4. Add or update participant (prevents duplicate rows on rejoin)
 export async function upsertParticipant(
   meetingId: string,
   name: string,
@@ -222,6 +222,31 @@ export async function upsertParticipant(
   status: 'pending' | 'admitted' | 'denied' | 'left' = 'pending'
 ): Promise<DBParticipant | null> {
   try {
+    const now = new Date().toISOString();
+    // Check if participant already exists for this meeting
+    const { data: existing } = await supabase
+      .from('meeting_participants')
+      .select('*')
+      .eq('meeting_id', meetingId)
+      .eq('name', name)
+      .order('joined_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (existing) {
+      const { data, error } = await supabase
+        .from('meeting_participants')
+        .update({
+          role,
+          status,
+          last_seen_at: now,
+        })
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      if (!error && data) return data as DBParticipant;
+    }
+
     const { data, error } = await supabase
       .from('meeting_participants')
       .insert({
@@ -229,6 +254,8 @@ export async function upsertParticipant(
         name,
         role,
         status,
+        joined_at: now,
+        last_seen_at: now,
       })
       .select('*')
       .single();
@@ -242,6 +269,26 @@ export async function upsertParticipant(
   } catch (err) {
     console.warn('Supabase participant error:', err);
     return null;
+  }
+}
+
+// 4b. Mark participant as left when they disconnect or leave call
+export async function markParticipantLeft(
+  meetingId: string,
+  name: string
+): Promise<void> {
+  try {
+    const now = new Date().toISOString();
+    await supabase
+      .from('meeting_participants')
+      .update({
+        status: 'left',
+        last_seen_at: now,
+      })
+      .eq('meeting_id', meetingId)
+      .eq('name', name);
+  } catch (err) {
+    console.warn('Error marking participant left:', err);
   }
 }
 

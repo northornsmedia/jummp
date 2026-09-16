@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, Suspense, useCallback } from 'react';
+import React, { useState, useEffect, useRef, Suspense, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
@@ -67,6 +67,8 @@ import {
   saveChatMessage,
   getMeetingMessages,
   checkMeetingStatus,
+  upsertParticipant,
+  markParticipantLeft,
   DBMeeting,
   MeetingStatusCheck,
 } from '@/lib/supabaseClient';
@@ -157,8 +159,43 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [admissionToken, setAdmissionToken] = useState<string | null>(null);
   const [participantId] = useState(() => crypto.randomUUID());
   const [transportMode, setTransportMode] = useState<'checking' | 'livekit' | 'p2p'>('checking');
-  const [participants, setParticipants] = useState<Participant[]>([]);
   const [pendingRequests, setPendingRequests] = useState<JoinRequest[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
+
+  // Deduplicated remote participants list (strictly eliminates duplicate tiles and excludes local self/host)
+  const otherParticipants = useMemo(() => {
+    const myNormalized = (userName || (isHost ? 'Host' : '')).trim().toLowerCase();
+
+    // Deduplicate strictly by normalized lowercase name and merge to retain host/audio/video flags
+    const byName = new Map<string, Participant>();
+
+    for (const p of participants) {
+      const pNormalized = (p.name || '').trim().toLowerCase();
+      if (!pNormalized) continue;
+
+      // Strictly skip the local user (prevents host or user seeing self as a remote tile)
+      if (pNormalized === myNormalized) continue;
+      // If we are the host, skip any participant marked as host or named 'host'
+      if (isHost && (p.isHost || pNormalized === 'host')) continue;
+
+      const existing = byName.get(pNormalized);
+      if (!existing) {
+        byName.set(pNormalized, { ...p, name: p.name.trim() });
+      } else {
+        // Merge so we retain isHost: true and active settings without creating duplicate tiles
+        byName.set(pNormalized, {
+          ...existing,
+          ...p,
+          name: p.name.trim() || existing.name,
+          isHost: Boolean(existing.isHost || p.isHost || pNormalized === 'host'),
+          audioEnabled: existing.audioEnabled ?? p.audioEnabled ?? true,
+          videoEnabled: existing.videoEnabled ?? p.videoEnabled ?? true,
+        });
+      }
+    }
+
+    return Array.from(byName.values());
+  }, [participants, userName, isHost]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { id: '1', sender: 'JUMMP Bot', text: 'Welcome to JUMMP Meet. Call is encrypted and ready.', time: 'Just now' },
   ]);
@@ -373,7 +410,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       return;
     }
 
-    const otherParticipantsCount = participants.filter((p) => p.name !== userName).length;
+    const myNormalized = (userName || (isHost ? 'Host' : '')).trim().toLowerCase();
+    const otherParticipantsCount = participants.filter((p) => {
+      const pNorm = (p.name || '').trim().toLowerCase();
+      if (!pNorm || pNorm === myNormalized) return false;
+      if (isHost && (p.isHost || pNorm === 'host')) return false;
+      return true;
+    }).length;
 
     if (otherParticipantsCount === 0) {
       if (!aloneSinceRef.current) {
@@ -399,7 +442,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }, 8000);
 
     return () => clearInterval(watchdogInterval);
-  }, [inCall, participants, userName, showStillHereModal]);
+  }, [inCall, participants, userName, isHost, showStillHereModal]);
 
   // Countdown timer when "Are you still here?" modal is shown
   useEffect(() => {
@@ -1033,15 +1076,39 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           });
 
           room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
-            const displayName = participant.name || participant.identity;
+            const displayName = (participant.name || participant.identity || '').trim();
+            const normalizedDisplay = displayName.toLowerCase();
+            const normalizedLocal = (userName || (isHost ? 'Host' : '')).trim().toLowerCase();
+
+            // CRITICAL: Never add the local user as a remote participant!
+            if (!normalizedDisplay || normalizedDisplay === normalizedLocal) return;
+
             setParticipants((prev) => {
-              if (prev.some((p) => p.id === participant.identity)) return prev;
+              // Deduplicate by normalized name or participant identity
+              const existingIdx = prev.findIndex(
+                (p) =>
+                  p.id === participant.identity ||
+                  p.name.trim().toLowerCase() === normalizedDisplay
+              );
+
+              if (existingIdx !== -1) {
+                // Update existing participant in-place without duplicating
+                const updated = [...prev];
+                updated[existingIdx] = {
+                  ...updated[existingIdx],
+                  id: participant.identity,
+                  name: displayName || updated[existingIdx].name,
+                  isHost: updated[existingIdx].isHost || normalizedDisplay === 'host' || normalizedDisplay.includes('host'),
+                };
+                return updated;
+              }
+
               return [
                 ...prev,
                 {
                   id: participant.identity,
                   name: displayName,
-                  isHost: false,
+                  isHost: normalizedDisplay === 'host' || normalizedDisplay.includes('host'),
                   audioEnabled: true,
                   videoEnabled: true,
                   handRaised: false,
@@ -1053,19 +1120,77 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           });
 
           room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
-            const displayName = participant.name || participant.identity;
+            const displayName = (participant.name || participant.identity || '').trim();
+            const normalizedDisplay = displayName.toLowerCase();
+
             setRemoteStreams((prev) => {
               const next = { ...prev };
-              delete next[displayName];
+              Object.keys(next).forEach((k) => {
+                if (k.trim().toLowerCase() === normalizedDisplay || k === displayName) {
+                  delete next[k];
+                }
+              });
               return next;
             });
             delete remoteStreamsRef.current[displayName];
-            setParticipants((prev) => prev.filter((p) => p.id !== participant.identity));
+            Object.keys(remoteStreamsRef.current).forEach((k) => {
+              if (k.trim().toLowerCase() === normalizedDisplay) {
+                delete remoteStreamsRef.current[k];
+              }
+            });
+
+            // Remove by BOTH identity and normalized name so they never linger as ghost tiles
+            setParticipants((prev) =>
+              prev.filter(
+                (p) =>
+                  p.id !== participant.identity &&
+                  p.name.trim().toLowerCase() !== normalizedDisplay
+              )
+            );
             const audioEl = document.getElementById(`livekit-audio-${participant.identity}`);
             if (audioEl) audioEl.remove();
           });
 
           await room.connect(data.url, data.token);
+
+          // Synchronize any participants already in the room upon connection
+          room.remoteParticipants.forEach((participant) => {
+            const displayName = (participant.name || participant.identity || '').trim();
+            const normalizedDisplay = displayName.toLowerCase();
+            const normalizedLocal = (userName || (isHost ? 'Host' : '')).trim().toLowerCase();
+            if (!normalizedDisplay || normalizedDisplay === normalizedLocal) return;
+
+            setParticipants((prev) => {
+              const existingIdx = prev.findIndex(
+                (p) =>
+                  p.id === participant.identity ||
+                  p.name.trim().toLowerCase() === normalizedDisplay
+              );
+              if (existingIdx !== -1) {
+                const updated = [...prev];
+                updated[existingIdx] = {
+                  ...updated[existingIdx],
+                  id: participant.identity,
+                  name: displayName || updated[existingIdx].name,
+                  isHost: updated[existingIdx].isHost || normalizedDisplay === 'host' || normalizedDisplay.includes('host'),
+                };
+                return updated;
+              }
+              return [
+                ...prev,
+                {
+                  id: participant.identity,
+                  name: displayName,
+                  isHost: normalizedDisplay === 'host' || normalizedDisplay.includes('host'),
+                  audioEnabled: true,
+                  videoEnabled: true,
+                  handRaised: false,
+                  isScreenSharing: false,
+                  joinedAt: Date.now(),
+                },
+              ];
+            });
+          });
 
           if (localStreamRef.current) {
             const videoTrack = localStreamRef.current.getVideoTracks()[0];
@@ -1247,22 +1372,26 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       }
 
       // Auto-ensure targetName is in participants list so video tile renders immediately!
-      setParticipants((prev) => {
-        if (prev.some((p) => p.name === targetName)) return prev;
-        return [
-          ...prev,
-          {
-            id: 'peer-' + targetName,
-            name: targetName,
-            isHost: targetName === 'Host',
-            audioEnabled: true,
-            videoEnabled: incomingTrack.kind === 'video' ? !incomingTrack.muted : true,
-            handRaised: false,
-            isScreenSharing: false,
-            joinedAt: Date.now(),
-          },
-        ];
-      });
+      const targetNormalized = (targetName || '').trim().toLowerCase();
+      const myNormalized = (userName || (isHost ? 'Host' : 'Guest')).trim().toLowerCase();
+      if (targetNormalized && targetNormalized !== myNormalized) {
+        setParticipants((prev) => {
+          if (prev.some((p) => (p.name || '').trim().toLowerCase() === targetNormalized)) return prev;
+          return [
+            ...prev,
+            {
+              id: 'peer-' + targetName.trim(),
+              name: targetName.trim(),
+              isHost: targetNormalized === 'host' || targetNormalized.includes('host'),
+              audioEnabled: true,
+              videoEnabled: incomingTrack.kind === 'video' ? !incomingTrack.muted : true,
+              handRaised: false,
+              isScreenSharing: false,
+              joinedAt: Date.now(),
+            },
+          ];
+        });
+      }
     };
 
     pc.onicecandidate = (event) => {
@@ -1367,29 +1496,38 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             joinedAt: Date.now(),
           };
 
-          // Populate participants roster immediately from host's existing list
-          const initialList: Participant[] = [];
+          // Populate participants roster cleanly from host's list (never duplicate host or self)
+          const myNormalized = myParticipant.name.trim().toLowerCase();
+          const initialMap = new Map<string, Participant>();
+
           if (Array.isArray(msg.payload.existingParticipants)) {
             msg.payload.existingParticipants.forEach((p: Participant) => {
-              if (p.name !== myParticipant.name) {
-                initialList.push(p);
+              const k = p.name.trim().toLowerCase();
+              if (k !== myNormalized) {
+                initialMap.set(k, p);
               }
             });
           }
-          if (msg.payload.hostName && !initialList.some((p) => p.name === msg.payload.hostName)) {
-            initialList.push({
-              id: 'host-user',
-              name: msg.payload.hostName,
-              isHost: true,
-              audioEnabled: true,
-              videoEnabled: true,
-              handRaised: false,
-              isScreenSharing: false,
-              joinedAt: Date.now(),
-            });
+
+          if (msg.payload.hostName) {
+            const hostNormalized = msg.payload.hostName.trim().toLowerCase();
+            if (hostNormalized !== myNormalized) {
+              const existingHost = initialMap.get(hostNormalized);
+              initialMap.set(hostNormalized, {
+                id: existingHost?.id || 'host-user',
+                name: msg.payload.hostName,
+                isHost: true,
+                audioEnabled: existingHost?.audioEnabled ?? true,
+                videoEnabled: existingHost?.videoEnabled ?? true,
+                handRaised: existingHost?.handRaised ?? false,
+                isScreenSharing: existingHost?.isScreenSharing ?? false,
+                joinedAt: existingHost?.joinedAt ?? Date.now(),
+              });
+            }
           }
-          initialList.push(myParticipant);
-          setParticipants(initialList);
+
+          // Only keep remote participants in participants state
+          setParticipants(Array.from(initialMap.values()));
 
           // Broadcast USER_JOINED so existing participants connect WebRTC to us
           channelRef.current?.send('USER_JOINED', myParticipant);
@@ -1434,21 +1572,38 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'USER_JOINED') {
         playChime('admit');
         const joinedP = msg.payload;
-        setParticipants((prev) => [
-          ...prev.filter((p) => p.name !== joinedP.name),
-          joinedP,
-        ]);
-        showToast('Participant Joined', `${joinedP.name} entered the call`, 'user');
+        const myName = (userName || (isHost ? 'Host' : 'Guest')).trim();
+        const myNormalized = myName.toLowerCase();
+        const joinedName = (joinedP?.name || '').trim();
+        const joinedNormalized = joinedName.toLowerCase();
 
-        const myName = userName || (isHost ? 'Host' : 'Guest');
-        if (inCall && joinedP.name !== myName) {
-          // Send room roster so the newcomer definitely has all users
+        // Strictly ignore if this event is for ourselves (no duplicate self tiles!)
+        if (!joinedNormalized || joinedNormalized === myNormalized) return;
+
+        setParticipants((prev) => {
+          const filtered = prev.filter(
+            (p) =>
+              (p.name || '').trim().toLowerCase() !== joinedNormalized &&
+              p.id !== joinedP.id
+          );
+          return [...filtered, { ...joinedP, name: joinedName }];
+        });
+        showToast('Participant Joined', `${joinedName} entered the call`, 'user');
+
+        if (inCall) {
+          // Send room roster so the newcomer definitely has all users without duplicates
+          const rosterParticipants = latestMeetingStateRef.current.participants
+            .filter((p) => {
+              const pNorm = (p.name || '').trim().toLowerCase();
+              return pNorm !== joinedNormalized && pNorm !== myNormalized;
+            });
+
           channelRef.current?.send('ROOM_ROSTER', {
-            to: joinedP.name,
+            to: joinedName,
             participants: [
-              ...latestMeetingStateRef.current.participants.filter((p) => p.name !== joinedP.name),
+              ...rosterParticipants,
               {
-                id: 'self-' + myName,
+                id: isHost ? 'host-user' : ('self-' + myName),
                 name: myName,
                 isHost,
                 audioEnabled: latestMeetingStateRef.current.micEnabled,
@@ -1480,7 +1635,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           }
 
           if (transportMode !== 'livekit') try {
-            const pc = createPeerConnection(joinedP.name);
+            const pc = createPeerConnection(joinedName);
             // Ensure camera/mic tracks are attached
             if (localStreamRef.current) {
               localStreamRef.current.getTracks().forEach((track) => {
@@ -1495,11 +1650,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               const screenTrack = activeLocalScreen.getVideoTracks()[0];
               if (screenTrack) {
                 const sender = pc.addTrack(screenTrack, activeLocalScreen);
-                screenSendersRef.current[joinedP.name] = sender;
+                screenSendersRef.current[joinedName] = sender;
               }
               const screenAudioTrack = activeLocalScreen.getAudioTracks()[0];
               if (screenAudioTrack) {
-                screenAudioSendersRef.current[joinedP.name] = pc.addTrack(
+                screenAudioSendersRef.current[joinedName] = pc.addTrack(
                   screenAudioTrack,
                   activeLocalScreen
                 );
@@ -1510,7 +1665,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             await pc.setLocalDescription(offer);
             channelRef.current?.send('WEBRTC_SIGNAL', {
               from: myName,
-              to: joinedP.name,
+              to: joinedName,
               type: 'offer',
               sdp: offer,
             });
@@ -1519,30 +1674,82 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           }
         }
       } else if (msg.type === 'ROOM_ROSTER') {
-        const myName = userName || (isHost ? 'Host' : 'Guest');
-        if (msg.payload.to === myName && Array.isArray(msg.payload.participants)) {
+        const myName = (userName || (isHost ? 'Host' : 'Guest')).trim();
+        const myNormalized = myName.toLowerCase();
+        const targetTo = (msg.payload?.to || '').trim().toLowerCase();
+
+        if (targetTo === myNormalized && Array.isArray(msg.payload.participants)) {
           setParticipants((prev) => {
             const map = new Map<string, Participant>();
-            prev.forEach((p) => map.set(p.name, p));
-            msg.payload.participants.forEach((p: Participant) => map.set(p.name, p));
+            // Add existing remote participants (excluding ourselves)
+            prev.forEach((p) => {
+              const k = (p.name || '').trim().toLowerCase();
+              if (k && k !== myNormalized) {
+                map.set(k, p);
+              }
+            });
+            // Merge incoming participants (excluding ourselves)
+            msg.payload.participants.forEach((p: Participant) => {
+              const k = (p.name || '').trim().toLowerCase();
+              if (k && k !== myNormalized) {
+                const existing = map.get(k);
+                map.set(k, {
+                  ...p,
+                  id: existing?.id || p.id,
+                  name: p.name.trim(),
+                  isHost: Boolean(existing?.isHost || p.isHost || k === 'host'),
+                });
+              }
+            });
             return Array.from(map.values());
           });
         }
       } else if (msg.type === 'USER_LEFT') {
         playChime('leave');
-        setParticipants((prev) => prev.filter((p) => p.name !== msg.payload.name));
-        showToast('Participant Left', `${msg.payload.name} left the room`, 'user');
-        if (peerConnectionsRef.current[msg.payload.name]) {
-          peerConnectionsRef.current[msg.payload.name].close();
-          delete peerConnectionsRef.current[msg.payload.name];
-        }
-        delete screenSendersRef.current[msg.payload.name];
-        delete screenAudioSendersRef.current[msg.payload.name];
-        delete pendingCandidatesRef.current[msg.payload.name];
+        const leavingName = (msg.payload?.name || '').trim();
+        const leavingNormalized = leavingName.toLowerCase();
+        const leavingId = msg.payload?.id;
+
+        setParticipants((prev) =>
+          prev.filter((p) => {
+            const pNorm = (p.name || '').trim().toLowerCase();
+            if (leavingNormalized && pNorm === leavingNormalized) return false;
+            if (leavingId && p.id === leavingId) return false;
+            return true;
+          })
+        );
+        showToast('Participant Left', `${leavingName || 'A participant'} left the room`, 'user');
+
+        // Cleanup WebRTC peers
+        Object.keys(peerConnectionsRef.current).forEach((k) => {
+          if (k.trim().toLowerCase() === leavingNormalized || (leavingName && k === leavingName)) {
+            try {
+              peerConnectionsRef.current[k]?.close();
+            } catch {}
+            delete peerConnectionsRef.current[k];
+          }
+        });
+        delete screenSendersRef.current[leavingName];
+        delete screenAudioSendersRef.current[leavingName];
+        delete pendingCandidatesRef.current[leavingName];
+
+        // Clean up remoteStreams
         setRemoteStreams((prev) => {
           const next = { ...prev };
-          delete next[msg.payload.name];
+          Object.keys(next).forEach((k) => {
+            if (k.trim().toLowerCase() === leavingNormalized || (leavingName && k === leavingName)) {
+              delete next[k];
+            }
+          });
           return next;
+        });
+
+        // Clean up remoteStreamsRef
+        delete remoteStreamsRef.current[leavingName];
+        Object.keys(remoteStreamsRef.current).forEach((k) => {
+          if (k.trim().toLowerCase() === leavingNormalized) {
+            delete remoteStreamsRef.current[k];
+          }
         });
       } else if (msg.type === 'MUTE_PARTICIPANT_AUDIO') {
         const myName = userName || (isHost ? 'Host' : 'Guest');
@@ -1691,22 +1898,26 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         if (to !== myName) return;
 
         // Auto-ensure 'from' is in participants list
-        setParticipants((prev) => {
-          if (prev.some((p) => p.name === from)) return prev;
-          return [
-            ...prev,
-            {
-              id: 'peer-' + from,
-              name: from,
-              isHost: from === 'Host',
-              audioEnabled: true,
-              videoEnabled: true,
-              handRaised: false,
-              isScreenSharing: false,
-              joinedAt: Date.now(),
-            },
-          ];
-        });
+        const fromNormalized = (from || '').trim().toLowerCase();
+        const myNormalized = (myName || '').trim().toLowerCase();
+        if (fromNormalized && fromNormalized !== myNormalized) {
+          setParticipants((prev) => {
+            if (prev.some((p) => (p.name || '').trim().toLowerCase() === fromNormalized)) return prev;
+            return [
+              ...prev,
+              {
+                id: 'peer-' + from.trim(),
+                name: from.trim(),
+                isHost: fromNormalized === 'host' || fromNormalized.includes('host'),
+                audioEnabled: true,
+                videoEnabled: true,
+                handRaised: false,
+                isScreenSharing: false,
+                joinedAt: Date.now(),
+              },
+            ];
+          });
+        }
 
         let pc = peerConnectionsRef.current[from] || createPeerConnection(from);
 
@@ -2314,9 +2525,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         isScreenSharing: false,
         joinedAt: Date.now(),
       };
-      setParticipants((prev) => [...prev.filter((p) => p.name !== name), participant]);
+      // Local host is already rendered via local user video tile. Keep participants strictly for remote peers.
+      setParticipants((prev) => prev.filter((p) => p.name.trim().toLowerCase() !== name.toLowerCase() && !p.isHost));
       void sendHostEvent('HOST_ARRIVED', { hostName: name });
       channelRef.current?.send('USER_JOINED', participant);
+      upsertParticipant(meetingId, name, 'host', 'admitted').catch(() => {});
     } else {
       // Guest: Approval is strictly required! No open access bypass.
       playChime('knock');
@@ -2362,7 +2575,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       isScreenSharing: false,
       joinedAt: Date.now(),
     };
-    setParticipants((prev) => [...prev.filter((p) => p.name !== newParticipant.name), newParticipant]);
+    setParticipants((prev) => [
+      ...prev.filter((p) => p.name.trim().toLowerCase() !== req.name.trim().toLowerCase() && p.id !== req.id),
+      newParticipant,
+    ]);
 
     void sendHostEvent('ADMIT_GUEST', {
       guestName: req.name,
@@ -2370,10 +2586,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       admissionToken: admission.admissionToken,
       hostName: myName,
       existingParticipants: [
-        ...participants.filter((p) => p.name !== req.name),
+        ...participants.filter(
+          (p) =>
+            p.name.trim().toLowerCase() !== req.name.trim().toLowerCase() &&
+            p.name.trim().toLowerCase() !== myName.trim().toLowerCase()
+        ),
         newParticipant,
       ],
     });
+    upsertParticipant(meetingId, req.name, 'guest', 'admitted').catch(() => {});
   };
 
   // Host Denies Guest
@@ -2412,9 +2633,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const handleLeaveCall = () => {
     triggerHaptic('heavy');
     playChime('leave');
+    const myName = userName || (isHost ? 'Host' : 'Guest');
     if (channelRef.current) {
-      channelRef.current.send('USER_LEFT', { name: userName || (isHost ? 'Host' : 'Guest') });
+      channelRef.current.send('USER_LEFT', { name: myName, id: participantId });
     }
+    markParticipantLeft(meetingId, myName).catch(() => {});
 
     // Stop and kill all local media hardware tracks immediately to release camera/mic
     if (localStreamRef.current) {
@@ -2463,6 +2686,29 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     setInCall(false);
   };
   handleLeaveCallRef.current = handleLeaveCall;
+
+  // Window unload & pagehide listeners: cleanly notify peers and Supabase when tab is closed, reloaded, or navigated away
+  useEffect(() => {
+    if (!inCall) return;
+
+    const handleWindowUnload = () => {
+      const myName = userName || (isHost ? 'Host' : 'Guest');
+      channelRef.current?.send('USER_LEFT', { name: myName, id: participantId });
+      if (livekitRoomRef.current) {
+        try {
+          livekitRoomRef.current.disconnect();
+        } catch {}
+      }
+      markParticipantLeft(meetingId, myName).catch(() => {});
+    };
+
+    window.addEventListener('beforeunload', handleWindowUnload);
+    window.addEventListener('pagehide', handleWindowUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleWindowUnload);
+      window.removeEventListener('pagehide', handleWindowUnload);
+    };
+  }, [inCall, userName, isHost, meetingId, participantId]);
 
   // Reopen Expired or Ended Meeting
   const handleReopenMeeting = async () => {
@@ -2921,7 +3167,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // =========================================================================
   // VIEW 4: ACTIVE IN-CALL JUMMP MEET EXPERIENCE (Mobile Viewport Masterpiece)
   // =========================================================================
-  const otherParticipants = participants.filter((p) => p.name !== userName);
 
   return (
     <div className="h-[100dvh] min-h-[100dvh] bg-slate-950 text-white flex flex-col overflow-hidden select-none relative">
@@ -3310,7 +3555,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 {/* Other Remote Participants */}
                 {otherParticipants.map((participant) => {
                   const isSharer = participant.name === activeScreenSharer;
-                  const remoteStream = remoteStreams[participant.name];
+                  const remoteStream =
+                    remoteStreams[participant.name] ||
+                    remoteStreams[participant.name.trim()] ||
+                    Object.entries(remoteStreams).find(
+                      ([k]) => k.trim().toLowerCase() === participant.name.trim().toLowerCase()
+                    )?.[1];
                   const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                   const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
 
@@ -3521,7 +3771,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
                   {/* Remote Participant Tile */}
                   {otherParticipants.map((participant) => {
-                    const remoteStream = remoteStreams[participant.name];
+                    const remoteStream =
+                      remoteStreams[participant.name] ||
+                      remoteStreams[participant.name.trim()] ||
+                      Object.entries(remoteStreams).find(
+                        ([k]) => k.trim().toLowerCase() === participant.name.trim().toLowerCase()
+                      )?.[1];
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                     const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
 
@@ -3669,7 +3924,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
                   {/* Remote Participant Tiles */}
                   {otherParticipants.map((participant) => {
-                    const remoteStream = remoteStreams[participant.name];
+                    const remoteStream =
+                      remoteStreams[participant.name] ||
+                      remoteStreams[participant.name.trim()] ||
+                      Object.entries(remoteStreams).find(
+                        ([k]) => k.trim().toLowerCase() === participant.name.trim().toLowerCase()
+                      )?.[1];
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                     const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
 
@@ -3855,7 +4115,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     <Users className="w-3.5 h-3.5" />
                     <span>People</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 font-mono">
-                      {participants.length}
+                      {1 + otherParticipants.length}
                     </span>
                   </button>
 
@@ -3932,7 +4192,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between pb-1">
                       <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">
-                        In Call ({participants.length})
+                        In Call ({1 + otherParticipants.length})
                       </div>
                       {isHost && otherParticipants.length > 0 && (
                         <div className="flex items-center gap-1.5">
@@ -4420,7 +4680,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               )}
             </button>
             <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
-              People ({participants.length})
+              People ({1 + otherParticipants.length})
             </span>
           </div>
 
