@@ -121,6 +121,32 @@ interface IncomingCallAlert {
   time: string;
 }
 
+// Safe JSON response parser that handles HTML error pages gracefully
+async function safeJsonParse(res: Response): Promise<{ ok: boolean; status: number; data: any; errorText?: string }> {
+  try {
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const data = await res.json();
+      return { ok: res.ok, status: res.status, data };
+    }
+    const text = await res.text();
+    const cleanSnippet = text.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+    return {
+      ok: false,
+      status: res.status,
+      data: null,
+      errorText: cleanSnippet || `HTTP ${res.status} (${res.statusText || 'Server Error'})`,
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      status: res.status,
+      data: null,
+      errorText: e.message || 'Failed to parse response',
+    };
+  }
+}
+
 export default function AdminDeskPage() {
   // Authentication State
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
@@ -158,9 +184,10 @@ export default function AdminDeskPage() {
   const checkAuth = useCallback(async () => {
     try {
       const res = await fetch('/api/admindesk/auth');
-      const authData = await res.json();
-      setIsAuthenticated(authData.authenticated === true);
-      return authData.authenticated === true;
+      const parsed = await safeJsonParse(res);
+      const isAuth = Boolean(parsed.ok && parsed.data?.authenticated === true);
+      setIsAuthenticated(isAuth);
+      return isAuth;
     } catch {
       setIsAuthenticated(false);
       return false;
@@ -176,8 +203,11 @@ export default function AdminDeskPage() {
         setIsAuthenticated(false);
         return;
       }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const payload: StatusPayload = await res.json();
+      const parsed = await safeJsonParse(res);
+      if (!parsed.ok || !parsed.data) {
+        throw new Error(parsed.errorText || `HTTP ${res.status}`);
+      }
+      const payload: StatusPayload = parsed.data;
       setData(payload);
       setIsAuthenticated(true);
       if (isManual) {
@@ -226,9 +256,9 @@ export default function AdminDeskPage() {
         }),
       });
 
-      const resData = await res.json();
-      if (!res.ok || !resData.success) {
-        throw new Error(resData.error || 'Invalid credentials');
+      const parsed = await safeJsonParse(res);
+      if (!parsed.ok || !parsed.data?.success) {
+        throw new Error(parsed.data?.error || parsed.errorText || `Login failed (HTTP ${res.status})`);
       }
 
       setIsAuthenticated(true);
@@ -351,12 +381,12 @@ export default function AdminDeskPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'extend_heartbeat', code }),
       });
-      const resData = await res.json();
-      if (resData.success) {
-        addLog('success', resData.message);
+      const parsed = await safeJsonParse(res);
+      if (parsed.ok && parsed.data?.success) {
+        addLog('success', parsed.data.message);
         await fetchStatus(false);
       } else {
-        addLog('warn', `Extend failed: ${resData.error}`);
+        addLog('warn', `Extend failed: ${parsed.data?.error || parsed.errorText || 'Error'}`);
       }
     } catch (err: any) {
       addLog('error', `Extend error: ${err.message}`);
@@ -373,12 +403,12 @@ export default function AdminDeskPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'sweep_stale' }),
       });
-      const resData = await res.json();
-      if (resData.success) {
-        addLog('success', resData.message);
+      const parsed = await safeJsonParse(res);
+      if (parsed.ok && parsed.data?.success) {
+        addLog('success', parsed.data.message);
         await fetchStatus(false);
       } else {
-        addLog('warn', `Sweep failed: ${resData.error}`);
+        addLog('warn', `Sweep failed: ${parsed.data?.error || parsed.errorText || 'Error'}`);
       }
     } catch (err: any) {
       addLog('error', `Error executing sweep: ${err.message}`);
@@ -397,12 +427,12 @@ export default function AdminDeskPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'force_end_room', code, meetingId }),
       });
-      const resData = await res.json();
-      if (resData.success) {
+      const parsed = await safeJsonParse(res);
+      if (parsed.ok && parsed.data?.success) {
         addLog('success', `Room ${code} was terminated successfully.`);
         await fetchStatus(false);
       } else {
-        addLog('error', `Could not end room: ${resData.error}`);
+        addLog('error', `Could not end room: ${parsed.data?.error || parsed.errorText || 'Error'}`);
       }
     } catch (err: any) {
       addLog('error', `Failed to end room: ${err.message}`);
