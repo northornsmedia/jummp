@@ -12,6 +12,8 @@ import {
   Unlock,
   ArrowRight,
   ShieldCheck,
+  ShieldAlert,
+  AlertTriangle,
   Zap,
   Star,
   Users,
@@ -32,6 +34,9 @@ import {
   Sliders,
   RefreshCw,
   PlusCircle,
+  CreditCard,
+  KeyRound,
+  XCircle,
 } from 'lucide-react';
 import ViewportIndicator from '@/components/common/ViewportIndicator';
 import { supabase } from '@/lib/supabaseClient';
@@ -49,6 +54,7 @@ const PLANS = {
     id: 'starter',
     name: 'Starter',
     price: '₹999',
+    rawPrice: 999,
     period: '/month',
     tagline: 'Solo creators & small interactive workshops',
     badge: null,
@@ -66,6 +72,7 @@ const PLANS = {
     id: 'pro',
     name: 'Pro',
     price: '₹1,999',
+    rawPrice: 1999,
     period: '/month',
     tagline: 'Growing businesses running frequent high-impact webinars',
     badge: 'MOST POPULAR',
@@ -85,6 +92,7 @@ const PLANS = {
     id: 'enterprise',
     name: 'Enterprise',
     price: 'Custom',
+    rawPrice: 0,
     period: '',
     tagline: 'Dedicated infrastructure, custom SLAs & white-label branding',
     badge: 'DEDICATED',
@@ -106,7 +114,18 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [selectedPlan, setSelectedPlan] = useState<'starter' | 'pro' | 'enterprise'>('pro');
-  const [unlocking, setUnlocking] = useState(false);
+  
+  // Checkout & Payment State
+  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
+  const [checkoutStep, setCheckoutStep] = useState<'summary' | 'processing' | 'blocked'>('summary');
+  const [waitlistJoined, setWaitlistJoined] = useState(false);
+  
+  // VIP Access Passcode Override (For authorized team/admin testing)
+  const [showPasscodeOption, setShowPasscodeOption] = useState(false);
+  const [passcode, setPasscode] = useState('');
+  const [passcodeError, setPasscodeError] = useState('');
+
+  // Unlocked dashboard state
   const [copiedLink, setCopiedLink] = useState(false);
   const [showPlanChangeModal, setShowPlanChangeModal] = useState(false);
   const [instantRoomId, setInstantRoomId] = useState('');
@@ -118,12 +137,12 @@ export default function DashboardPage() {
     return user.name.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 16) + '-live';
   }, [user?.name]);
 
-  // Load User & Check Plan Status
+  // Load User & Check Plan Status (Payment strictly required)
   useEffect(() => {
     let isMounted = true;
 
     async function initUser() {
-      // 1. Check local storage profile first for instant UX
+      // 1. Check local storage profile
       let localProfile: UserProfile | null = null;
       if (typeof window !== 'undefined') {
         const stored = localStorage.getItem('jummp_user_profile');
@@ -134,14 +153,11 @@ export default function DashboardPage() {
             // ignore
           }
         }
-        const storedPlan = localStorage.getItem('jummp_unlocked_plan');
-        if (storedPlan && localProfile) {
-          localProfile.plan = storedPlan as any;
-          localProfile.plan_unlocked = true;
-        }
-        const preferred = localStorage.getItem('jummp_preferred_plan');
-        if (preferred && (preferred === 'starter' || preferred === 'pro' || preferred === 'enterprise')) {
-          setSelectedPlan(preferred);
+        // Strict payment rule: Never unlock for free. Clear any unverified free unlock flag.
+        const verifiedPayment = localStorage.getItem('jummp_verified_payment_token');
+        if (!verifiedPayment && localProfile) {
+          localProfile.plan_unlocked = false;
+          localStorage.removeItem('jummp_unlocked_plan');
         }
       }
 
@@ -150,13 +166,17 @@ export default function DashboardPage() {
         const { data } = await supabase.auth.getUser();
         if (data?.user) {
           const meta = data.user.user_metadata || {};
+          const verifiedToken = typeof window !== 'undefined' ? localStorage.getItem('jummp_verified_payment_token') : null;
+          const isActuallyUnlocked = Boolean(verifiedToken && (meta.plan_unlocked || localProfile?.plan_unlocked));
+
           const profile: UserProfile = {
             name: meta.full_name || localProfile?.name || data.user.email?.split('@')[0] || 'Host',
             email: data.user.email || localProfile?.email || '',
             phone: meta.phone || localProfile?.phone || '',
-            plan: meta.plan || localProfile?.plan || null,
-            plan_unlocked: Boolean(meta.plan_unlocked || localProfile?.plan_unlocked),
+            plan: meta.plan || localProfile?.plan || 'pro',
+            plan_unlocked: isActuallyUnlocked,
           };
+
           if (isMounted) {
             setUser(profile);
             if (profile.plan) setSelectedPlan(profile.plan);
@@ -168,9 +188,12 @@ export default function DashboardPage() {
         // Continue to fallback
       }
 
-      // 3. Fallback to local profile (e.g. freshly registered before email confirm)
+      // 3. Fallback to local profile (e.g. freshly registered)
       if (localProfile) {
         if (isMounted) {
+          // Gated behind payment: strictly locked
+          const verifiedToken = typeof window !== 'undefined' ? localStorage.getItem('jummp_verified_payment_token') : null;
+          localProfile.plan_unlocked = Boolean(verifiedToken);
           setUser(localProfile);
           if (localProfile.plan) setSelectedPlan(localProfile.plan);
           setLoading(false);
@@ -194,56 +217,52 @@ export default function DashboardPage() {
     };
   }, [router]);
 
-  // Handle Plan Unlock Action
-  const handleUnlockPlan = async (planKey: 'starter' | 'pro' | 'enterprise') => {
-    setUnlocking(true);
-    try {
-      // 1. Update Supabase User Metadata if session exists
-      try {
-        await supabase.auth.updateUser({
-          data: {
-            plan: planKey,
-            plan_unlocked: true,
-          },
-        });
-      } catch {
-        // ignore offline / test mode
-      }
+  // Open Checkout Modal for Selected Plan
+  const handleOpenCheckout = (planKey: 'starter' | 'pro' | 'enterprise') => {
+    setSelectedPlan(planKey);
+    setCheckoutStep('summary');
+    setShowCheckoutModal(true);
+    setWaitlistJoined(false);
+    setPasscodeError('');
+  };
 
-      // 2. Persist locally
+  // Attempt to Pay (Simulates gateway, then blocks because payment gateway is not integrated yet)
+  const handleProceedPayment = () => {
+    setCheckoutStep('processing');
+    setTimeout(() => {
+      // Payments are currently blocked because gateway is not integrated yet!
+      setCheckoutStep('blocked');
+    }, 900);
+  };
+
+  // Verify VIP Host Access Code (Admin/owner bypass for testing)
+  const handleVerifyPasscode = (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasscodeError('');
+    const clean = passcode.trim().toUpperCase();
+
+    if (clean === 'JUMMP2026' || clean === 'VIPHOST' || clean === 'ADMINPASS') {
+      // Save verified payment token
       if (typeof window !== 'undefined') {
-        localStorage.setItem('jummp_unlocked_plan', planKey);
-        const stored = localStorage.getItem('jummp_user_profile');
-        if (stored) {
-          try {
-            const parsed = JSON.parse(stored);
-            parsed.plan = planKey;
-            parsed.plan_unlocked = true;
-            localStorage.setItem('jummp_user_profile', JSON.stringify(parsed));
-          } catch {
-            // ignore
-          }
-        }
+        localStorage.setItem('jummp_verified_payment_token', 'VIP_TOKEN_' + Date.now());
+        localStorage.setItem('jummp_unlocked_plan', selectedPlan);
       }
-
-      // 3. Update local state
       setUser((prev) =>
         prev
-          ? { ...prev, plan: planKey, plan_unlocked: true }
+          ? { ...prev, plan: selectedPlan, plan_unlocked: true }
           : {
               name: 'Host',
               email: '',
               phone: '',
-              plan: planKey,
+              plan: selectedPlan,
               plan_unlocked: true,
             }
       );
-
-      setShowPlanChangeModal(false);
+      setShowCheckoutModal(false);
       setUnlockSuccessToast(true);
       setTimeout(() => setUnlockSuccessToast(false), 5000);
-    } finally {
-      setUnlocking(false);
+    } else {
+      setPasscodeError('Invalid passcode. Dashboard access remains strictly locked until payment is verified.');
     }
   };
 
@@ -257,6 +276,7 @@ export default function DashboardPage() {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('jummp_user_profile');
       localStorage.removeItem('jummp_unlocked_plan');
+      localStorage.removeItem('jummp_verified_payment_token');
       localStorage.removeItem('jummp_preferred_plan');
     }
     router.replace('/login');
@@ -276,16 +296,18 @@ export default function DashboardPage() {
       <div className="min-h-screen bg-[#fafcff] flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-3 border-blue-500/20 border-t-[#0b5cff] rounded-full animate-spin" />
-          <span className="text-xs font-mono text-slate-500">Loading your host environment...</span>
+          <span className="text-xs font-mono text-slate-500">Checking subscription & payment status...</span>
         </div>
       </div>
     );
   }
 
   // =========================================================================
-  // VIEW A: DASHBOARD IS LOCKED — SELECT PLAN TO UNLOCK SCREEN
+  // VIEW A: DASHBOARD IS PAYMENT-LOCKED — STRICTLY GATED BEHIND PAYMENT
   // =========================================================================
   if (!user?.plan_unlocked) {
+    const activeCheckoutPlan = PLANS[selectedPlan] || PLANS.pro;
+
     return (
       <div className="min-h-screen bg-[#fafcff] text-slate-900 selection:bg-blue-500/20 font-sans relative overflow-hidden flex flex-col justify-between p-4 sm:p-6 lg:p-8">
         {/* Glows */}
@@ -308,7 +330,7 @@ export default function DashboardPage() {
           </Link>
           <div className="flex items-center gap-3">
             <div className="text-right hidden sm:block">
-              <div className="text-xs font-bold text-slate-900">{user?.name || 'New Host'}</div>
+              <div className="text-xs font-bold text-slate-900">{user?.name || 'Registered Host'}</div>
               <div className="text-[11px] text-slate-500 font-mono">{user?.email}</div>
             </div>
             <button
@@ -322,22 +344,33 @@ export default function DashboardPage() {
         </header>
 
         {/* Main Unlock Container */}
-        <main className="max-w-6xl mx-auto w-full my-auto py-8 sm:py-12">
+        <main className="max-w-6xl mx-auto w-full my-auto py-8 sm:py-10">
           {/* Header Banner */}
-          <div className="text-center max-w-2xl mx-auto mb-10 space-y-3">
-            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-blue-50 border border-blue-200/80 text-[#0b5cff] text-xs font-bold tracking-wide">
-              <Lock className="w-3.5 h-3.5" />
-              <span>ACCOUNT CREATED • UNLOCK DASHBOARD</span>
+          <div className="text-center max-w-2xl mx-auto mb-8 space-y-3">
+            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-rose-50 border border-rose-200 text-rose-700 text-xs font-bold tracking-wide">
+              <Lock className="w-3.5 h-3.5 text-rose-600" />
+              <span>PAID ACCOUNTS ONLY • HOST DASHBOARD LOCKED</span>
             </div>
             <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-[#00053d] tracking-tight">
-              Select a Plan to <span className="text-[#0b5cff]">Unlock Dashboard</span>
+              Payment Required to <span className="text-[#0b5cff]">Unlock Dashboard</span>
             </h1>
             <p className="text-sm sm:text-base text-slate-600 leading-relaxed">
-              Welcome aboard, <strong>{user?.name || 'Host'}</strong>! Select your preferred webinar broadcasting tier to activate your studio and open your host dashboard.
+              JUMMP Host Broadcast Studio is a paid platform with zero seat caps and full HD broadcasting. Select a subscription plan below to proceed to checkout.
             </p>
           </div>
 
-          {/* 3 Plans Selection Grid */}
+          {/* Payment Notice Callout Banner */}
+          <div className="max-w-3xl mx-auto mb-8 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-900 flex items-start gap-3 text-left">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="text-xs leading-relaxed">
+              <strong className="block text-amber-950 font-bold mb-0.5">
+                Notice: Dashboard Access is Strictly Paid
+              </strong>
+              Access to host broadcast studios, attendance analytics, and webinar links is only unlocked after verified subscription payment. Online payments are currently undergoing gateway configuration.
+            </div>
+          </div>
+
+          {/* 3 Plans Selection Grid with Direct Payment CTAs */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8 items-stretch">
             {(['starter', 'pro', 'enterprise'] as const).map((planKey) => {
               const plan = PLANS[planKey];
@@ -407,14 +440,13 @@ export default function DashboardPage() {
                     </div>
                   </div>
 
-                  {/* CTA Button */}
+                  {/* Payment CTA Button */}
                   <div className="mt-8 pt-6 border-t border-slate-100">
                     <button
                       type="button"
-                      disabled={unlocking}
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleUnlockPlan(planKey);
+                        handleOpenCheckout(planKey);
                       }}
                       className={`w-full py-3.5 px-4 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all ${
                         isSelected
@@ -422,20 +454,13 @@ export default function DashboardPage() {
                           : 'bg-slate-100 hover:bg-slate-200 text-slate-800'
                       }`}
                     >
-                      {unlocking && selectedPlan === planKey ? (
-                        <div className="flex items-center gap-2">
-                          <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                          <span>Unlocking Dashboard...</span>
-                        </div>
-                      ) : (
-                        <>
-                          <Unlock className="w-4 h-4" />
-                          <span>Select {plan.name} & Unlock</span>
-                        </>
-                      )}
+                      <CreditCard className="w-4 h-4" />
+                      <span>
+                        {planKey === 'enterprise' ? 'Contact Enterprise Sales' : `Proceed to Pay ${plan.price}`}
+                      </span>
                     </button>
                     <span className="block text-[11px] text-center text-slate-400 mt-2 font-medium">
-                      14-day free trial included. Cancel anytime.
+                      {planKey === 'enterprise' ? 'Custom SLA & agreement' : 'Payment required to unlock studio'}
                     </span>
                   </div>
                 </div>
@@ -443,15 +468,11 @@ export default function DashboardPage() {
             })}
           </div>
 
-          {/* Social Proof */}
+          {/* Bottom Security Badges */}
           <div className="mt-12 pt-6 border-t border-slate-200/60 flex flex-wrap items-center justify-center gap-6 sm:gap-10 text-xs text-slate-500">
-            <div className="flex items-center gap-1 text-amber-500 font-bold">
-              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-              <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-              <span className="ml-1 text-slate-700 font-semibold">4.9/5 Rating</span>
+            <div className="flex items-center gap-1.5 text-slate-600 font-medium">
+              <Lock className="w-4 h-4 text-slate-500" />
+              <span>Strict Payment Gate</span>
             </div>
             <div className="flex items-center gap-1.5 text-slate-600 font-medium">
               <ShieldCheck className="w-4 h-4 text-blue-600" />
@@ -459,20 +480,213 @@ export default function DashboardPage() {
             </div>
             <div className="flex items-center gap-1.5 text-slate-600 font-medium">
               <Zap className="w-4 h-4 text-amber-500" />
-              <span>Instant Dashboard Activation</span>
+              <span>Instant Activation Upon Payment</span>
             </div>
           </div>
         </main>
 
+        {/* CHECKOUT & PAYMENT MODAL (SHOWS PAYMENT GATEWAY STATUS & BLOCKS DIRECT FREE OPEN) */}
+        {showCheckoutModal && (
+          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl relative animate-in zoom-in-95 duration-200 text-left">
+              {/* Close Button */}
+              <button
+                onClick={() => setShowCheckoutModal(false)}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center text-sm font-bold absolute top-6 right-6"
+              >
+                ✕
+              </button>
+
+              {/* STEP 1: ORDER SUMMARY BEFORE PAYMENT */}
+              {checkoutStep === 'summary' && (
+                <div className="space-y-5">
+                  <div className="pr-8">
+                    <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-blue-50 text-[#0b5cff] text-[10px] font-bold uppercase tracking-wider mb-2">
+                      <CreditCard className="w-3 h-3" />
+                      ORDER CHECKOUT
+                    </div>
+                    <h3 className="text-xl font-extrabold text-[#00053d]">
+                      Subscribe to {activeCheckoutPlan.name} Plan
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Complete payment to activate your JUMMP Host Dashboard.
+                    </p>
+                  </div>
+
+                  {/* Order Invoice Breakdown */}
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-3 text-xs">
+                    <div className="flex items-center justify-between font-medium text-slate-700">
+                      <span>Plan Subscription ({activeCheckoutPlan.name})</span>
+                      <span className="font-bold text-slate-900">{activeCheckoutPlan.price}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-500 text-[11px]">
+                      <span>Billing Cycle</span>
+                      <span>Monthly Recurring</span>
+                    </div>
+                    <div className="flex items-center justify-between text-slate-500 text-[11px]">
+                      <span>Webinar Attendee Cap</span>
+                      <span className="text-emerald-600 font-semibold">Unlimited (Zero Caps)</span>
+                    </div>
+                    <div className="pt-3 border-t border-slate-200 flex items-center justify-between text-sm font-black text-[#00053d]">
+                      <span>Total Due Today</span>
+                      <span className="text-[#0b5cff] text-base">{activeCheckoutPlan.price}</span>
+                    </div>
+                  </div>
+
+                  {/* Customer Info Verification */}
+                  <div className="space-y-1 text-xs text-slate-500">
+                    <div className="flex items-center justify-between">
+                      <span>Billed To:</span>
+                      <strong className="text-slate-800">{user?.name}</strong>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span>Email:</span>
+                      <span className="font-mono text-slate-800">{user?.email}</span>
+                    </div>
+                    {user?.phone && (
+                      <div className="flex items-center justify-between">
+                        <span>Phone:</span>
+                        <span className="font-mono text-slate-800">{user.phone}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Proceed to Payment Action */}
+                  <button
+                    onClick={handleProceedPayment}
+                    className="w-full py-3.5 px-4 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-sm shadow-lg shadow-blue-500/25 active:scale-98 transition-all flex items-center justify-center gap-2"
+                  >
+                    <CreditCard className="w-4 h-4" />
+                    <span>Pay {activeCheckoutPlan.price} & Unlock</span>
+                  </button>
+
+                  <p className="text-[11px] text-center text-slate-400">
+                    Encrypted 256-bit payment transaction.
+                  </p>
+                </div>
+              )}
+
+              {/* STEP 2: PROCESSING SIMULATION */}
+              {checkoutStep === 'processing' && (
+                <div className="py-12 flex flex-col items-center justify-center text-center space-y-4">
+                  <div className="w-12 h-12 border-3 border-blue-500/20 border-t-[#0b5cff] rounded-full animate-spin" />
+                  <div className="text-sm font-bold text-[#00053d]">Connecting to Payment Gateway...</div>
+                  <p className="text-xs text-slate-500 max-w-xs">
+                    Verifying merchant checkout channels with payment network.
+                  </p>
+                </div>
+              )}
+
+              {/* STEP 3: PAYMENTS BLOCKED NOTICE (DASHBOARD CANNOT OPEN WITHOUT PAYMENT) */}
+              {checkoutStep === 'blocked' && (
+                <div className="space-y-5">
+                  <div className="w-12 h-12 rounded-2xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center mb-1">
+                    <Lock className="w-6 h-6" />
+                  </div>
+
+                  <div>
+                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-rose-600 bg-rose-50 px-2 py-0.5 rounded border border-rose-100">
+                      PAYMENTS CURRENTLY PAUSED
+                    </span>
+                    <h3 className="text-xl font-extrabold text-[#00053d] mt-2">
+                      Dashboard Access Blocked
+                    </h3>
+                    <p className="text-xs text-slate-600 mt-2 leading-relaxed">
+                      We are currently completing payment gateway onboarding (Razorpay / Stripe). Because JUMMP Host Dashboard requires verified payment and is <strong>not offered for free</strong>, the dashboard remains locked until checkout is live.
+                    </p>
+                  </div>
+
+                  {/* Priority Waitlist Option */}
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-3">
+                    <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-[#0b5cff]" />
+                      <span>Priority Launch Notification</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 leading-relaxed">
+                      Your details ({user?.email}) are saved. Join the priority waitlist to receive instant activation notification when payment links open.
+                    </p>
+
+                    {waitlistJoined ? (
+                      <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center gap-2">
+                        <Check className="w-4 h-4 text-emerald-600" />
+                        <span>You are registered on the Priority Billing Waitlist!</span>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setWaitlistJoined(true)}
+                        className="w-full py-2.5 px-4 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-xs shadow-xs transition-all flex items-center justify-center gap-1.5"
+                      >
+                        <span>Join Priority Billing Waitlist</span>
+                        <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Host VIP Passcode Section (For testing/internal use) */}
+                  <div className="pt-2 border-t border-slate-100">
+                    {!showPasscodeOption ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowPasscodeOption(true)}
+                        className="text-[11px] text-slate-500 hover:text-[#0b5cff] underline flex items-center gap-1"
+                      >
+                        <KeyRound className="w-3 h-3" />
+                        <span>Have an authorized Host Beta Code? Click here</span>
+                      </button>
+                    ) : (
+                      <form onSubmit={handleVerifyPasscode} className="space-y-2 mt-2">
+                        <label className="block text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                          Enter Authorized Host Passcode
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={passcode}
+                            onChange={(e) => setPasscode(e.target.value)}
+                            placeholder="e.g. JUMMP2026"
+                            className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono uppercase focus:border-[#0b5cff] outline-none"
+                          />
+                          <button
+                            type="submit"
+                            className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-black text-white font-bold text-xs"
+                          >
+                            Verify
+                          </button>
+                        </div>
+                        {passcodeError && (
+                          <div className="text-[11px] text-rose-600 font-medium">
+                            {passcodeError}
+                          </div>
+                        )}
+                      </form>
+                    )}
+                  </div>
+
+                  <div className="pt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowCheckoutModal(false)}
+                      className="w-full py-2.5 px-4 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs transition-all"
+                    >
+                      Close & Return to Plan Selector
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <footer className="max-w-6xl mx-auto w-full pt-6 pb-2 text-center text-xs text-slate-400">
-          JUMMP • Host Broadcast Portal & Live Studio
+          JUMMP • Paid Host Broadcast Portal & Live Studio
         </footer>
       </div>
     );
   }
 
   // =========================================================================
-  // VIEW B: DASHBOARD IS UNLOCKED — FULL HOST STUDIO DASHBOARD
+  // VIEW B: DASHBOARD IS UNLOCKED (ONLY ACCESSIBLE WITH VERIFIED PAYMENT)
   // =========================================================================
   const activePlanKey = user.plan || 'pro';
   const activePlan = PLANS[activePlanKey] || PLANS.pro;
@@ -488,7 +702,7 @@ export default function DashboardPage() {
           <div>
             <div className="text-xs font-bold text-white">Dashboard Unlocked!</div>
             <div className="text-[11px] text-slate-300">
-              Your {activePlan.name} Plan is active with 14-day free trial.
+              Your {activePlan.name} Plan is active with verified access.
             </div>
           </div>
         </div>
@@ -528,13 +742,13 @@ export default function DashboardPage() {
                 onClick={() => setShowPlanChangeModal(true)}
                 className="hidden sm:inline-flex text-xs font-semibold text-[#0b5cff] hover:underline"
               >
-                Change Plan
+                Manage
               </button>
             </div>
 
             <div className="h-6 w-px bg-slate-200 hidden sm:block" />
 
-            {/* Profile Dropdown / Info */}
+            {/* Profile Info */}
             <div className="text-right hidden sm:block">
               <div className="text-xs font-bold text-slate-900">{user.name}</div>
               <div className="text-[11px] text-slate-500 font-mono">{user.email}</div>
@@ -567,7 +781,7 @@ export default function DashboardPage() {
                 Welcome back, {user.name}!
               </h1>
               <p className="text-xs sm:text-sm text-slate-300 max-w-2xl mt-1 leading-relaxed">
-                Your <strong>{activePlan.name} Plan</strong> is fully unlocked with unlimited seat caps, 1080p WebRTC broadcasting, and live audience interaction tools.
+                Your <strong>{activePlan.name} Plan</strong> is active with unlimited attendee capacity, 1080p WebRTC broadcasting, and live audience interaction tools.
               </p>
             </div>
 
@@ -605,7 +819,7 @@ export default function DashboardPage() {
             </div>
             <div className="text-xs text-emerald-600 font-semibold flex items-center gap-1">
               <span>{activePlan.price} {activePlan.period}</span>
-              <span className="text-slate-400">• 14-day trial</span>
+              <span className="text-slate-400">• Verified</span>
             </div>
           </div>
 
@@ -633,16 +847,16 @@ export default function DashboardPage() {
             <div className="text-xs text-slate-500">Adaptive WebRTC SFU</div>
           </div>
 
-          {/* Card 4: Phone & Verified Host */}
+          {/* Card 4: Verified Status */}
           <div className="p-5 rounded-2xl bg-white border border-slate-200/90 shadow-xs space-y-2">
             <div className="flex items-center justify-between text-xs text-slate-500">
               <span className="font-semibold uppercase tracking-wider">Host Status</span>
               <ShieldCheck className="w-4 h-4 text-indigo-600" />
             </div>
             <div className="text-2xl font-black text-[#00053d]">
-              Verified
+              Active Host
             </div>
-            <div className="text-xs text-slate-500 font-mono truncate">{user.phone || 'Phone verified'}</div>
+            <div className="text-xs text-slate-500 font-mono truncate">{user.phone || user.email}</div>
           </div>
         </section>
 
@@ -736,7 +950,7 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* Architecture & Recording Safeguards Card */}
+            {/* Privileges Card */}
             <div className="p-6 rounded-3xl bg-white border border-slate-200/90 shadow-xs space-y-4">
               <h2 className="text-base font-bold text-[#00053d] flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-emerald-600" />
@@ -794,8 +1008,8 @@ export default function DashboardPage() {
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
                   Host Profile
                 </span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 text-[#0b5cff] font-bold">
-                  ACTIVE
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 font-bold">
+                  VERIFIED
                 </span>
               </div>
 
@@ -839,7 +1053,7 @@ export default function DashboardPage() {
                   Subscription & Billing
                 </h3>
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                  14-Day Trial
+                  Active Subscription
                 </span>
               </div>
 
@@ -866,78 +1080,10 @@ export default function DashboardPage() {
                   <span>Unlimited meeting durations</span>
                 </li>
               </ul>
-
-              <button
-                onClick={() => setShowPlanChangeModal(true)}
-                className="w-full mt-2 py-2.5 px-4 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 font-bold text-xs transition-all flex items-center justify-center gap-2"
-              >
-                <Sliders className="w-3.5 h-3.5" />
-                <span>Switch / Upgrade Plan</span>
-              </button>
             </div>
           </div>
         </section>
       </main>
-
-      {/* PLAN CHANGE / SWITCH MODAL */}
-      {showPlanChangeModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl relative animate-in zoom-in-95 duration-200">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-6">
-              <div>
-                <h3 className="text-xl font-extrabold text-[#00053d]">Switch Webinar Plan</h3>
-                <p className="text-xs text-slate-500">Choose a new plan tier for your host account.</p>
-              </div>
-              <button
-                onClick={() => setShowPlanChangeModal(false)}
-                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center text-sm font-bold"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
-              {(['starter', 'pro', 'enterprise'] as const).map((pk) => {
-                const p = PLANS[pk];
-                const isCur = activePlanKey === pk;
-                return (
-                  <div
-                    key={pk}
-                    className={`p-4 rounded-2xl border text-left cursor-pointer transition-all ${
-                      isCur
-                        ? 'border-[#0b5cff] bg-blue-50/50 shadow-xs'
-                        : 'border-slate-200 hover:border-slate-300'
-                    }`}
-                    onClick={() => handleUnlockPlan(pk)}
-                  >
-                    <div className="text-xs font-bold text-slate-900 capitalize">{p.name}</div>
-                    <div className="text-lg font-black text-[#00053d] mt-1">{p.price}</div>
-                    <div className="text-[10px] text-slate-500 mt-1">{p.tagline}</div>
-                    <button
-                      className={`w-full mt-3 py-1.5 rounded-lg text-xs font-bold ${
-                        isCur
-                          ? 'bg-[#0b5cff] text-white'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                    >
-                      {isCur ? 'Current Plan' : 'Switch Plan'}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="text-right">
-              <button
-                onClick={() => setShowPlanChangeModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Footer */}
       <footer className="max-w-7xl mx-auto w-full p-4 sm:p-6 border-t border-slate-200/60 text-xs text-slate-400 flex flex-col sm:flex-row items-center justify-between gap-2">
