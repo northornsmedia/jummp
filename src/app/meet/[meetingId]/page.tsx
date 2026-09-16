@@ -128,6 +128,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const inCallVideoRef = useRef<HTMLVideoElement | null>(null);
   const screenShareVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteScreenVideoRef = useRef<HTMLVideoElement | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -904,10 +905,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub, participant: RemoteParticipant) => {
             if (track.kind === Track.Kind.Video) {
               const stream = new MediaStream([track.mediaStreamTrack]);
-              setRemoteStreams((prev) => ({
-                ...prev,
-                [participant.identity]: stream,
-              }));
+              if ((pub as any).source === Track.Source.ScreenShare) {
+                remoteScreenStreamRef.current = stream;
+                setRemoteScreenStream(stream);
+                setActiveScreenSharer(participant.identity);
+                activeScreenSharerRef.current = participant.identity;
+              } else {
+                remoteStreamsRef.current[participant.identity] = stream;
+                setRemoteStreams((prev) => ({
+                  ...prev,
+                  [participant.identity]: stream,
+                }));
+              }
             } else if (track.kind === Track.Kind.Audio) {
               const audioEl = track.attach();
               audioEl.id = `livekit-audio-${participant.identity}`;
@@ -991,6 +1000,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
   }, [screenStream, isScreenSharing]);
 
+  // Update remote screen share video ref reliably when remoteScreenStream changes
+  useEffect(() => {
+    const video = remoteScreenVideoRef.current;
+    if (video && remoteScreenStream) {
+      video.defaultMuted = true;
+      video.muted = true;
+      if (video.srcObject !== remoteScreenStream) {
+        video.srcObject = remoteScreenStream;
+      }
+      const playPromise = video.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.warn('[Screen] Autoplay retry:', err);
+          video.defaultMuted = true;
+          video.muted = true;
+          video.play().catch(() => {});
+        });
+      }
+    }
+  }, [remoteScreenStream, activeScreenSharer]);
+
   // Auto-scroll chat panel to latest message
   useEffect(() => {
     if (activePanel === 'chat') {
@@ -1066,25 +1096,25 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
       let isScreen = false;
       if (incomingTrack.kind === 'video') {
-        if (isCurrentSharer) {
-          if (alreadyHasWebcam && remoteWebcamTracksRef.current[targetName].id !== incomingTrack.id) {
-            isScreen = true;
-          } else if (!alreadyHasWebcam) {
-            isScreen = true;
-          }
-        }
         if (remoteScreenTrackIdRef.current && incomingTrack.id === remoteScreenTrackIdRef.current) {
           isScreen = true;
-        }
-        if (remoteScreenStreamIdRef.current && incomingStream.id === remoteScreenStreamIdRef.current) {
+        } else if (remoteScreenStreamIdRef.current && incomingStream.id === remoteScreenStreamIdRef.current) {
+          isScreen = true;
+        } else if ((incomingTrack as any).contentHint === 'detail') {
+          isScreen = true;
+        } else if (isCurrentSharer && alreadyHasWebcam && remoteWebcamTracksRef.current[targetName].id !== incomingTrack.id) {
           isScreen = true;
         }
       }
 
       if (isScreen) {
         console.log('[WebRTC] Identified as screen share stream from', targetName);
-        remoteScreenStreamRef.current = incomingStream;
-        setRemoteScreenStream(incomingStream);
+        const screenStreamObj = new MediaStream([incomingTrack]);
+        const incomingAudio = incomingStream.getAudioTracks()[0];
+        if (incomingAudio) screenStreamObj.addTrack(incomingAudio);
+
+        remoteScreenStreamRef.current = screenStreamObj;
+        setRemoteScreenStream(screenStreamObj);
         setActiveScreenSharer(targetName);
         activeScreenSharerRef.current = targetName;
       } else {
@@ -1238,12 +1268,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         activeScreenSharerRef.current = sharer;
         remoteScreenTrackIdRef.current = msg.payload?.trackId || null;
         remoteScreenStreamIdRef.current = msg.payload?.streamId || null;
-
-        // If the sharer's stream is already in remoteStreamsRef and remoteScreenStream isn't set, assign it immediately
-        if (sharer && remoteStreamsRef.current[sharer] && !remoteScreenStreamRef.current) {
-          remoteScreenStreamRef.current = remoteStreamsRef.current[sharer];
-          setRemoteScreenStream(remoteStreamsRef.current[sharer]);
-        }
 
         // If another person starts presenting while we are presenting, stop ours
         if (isScreenSharing && sharer !== (userName || (isHost ? 'Host' : 'Guest'))) {
@@ -1856,6 +1880,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         setActiveScreenSharer(myName);
 
         const screenTrack = stream.getVideoTracks()[0];
+        if (screenTrack) {
+          (screenTrack as any).contentHint = 'detail';
+        }
         const screenStreamId = stream.id;
         const screenTrackId = screenTrack?.id;
 
@@ -2967,32 +2994,41 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 ) : (
                   /* REMOTE USER IS VIEWING THE PRESENTATION */
                   <div className="relative w-full h-full flex items-center justify-center bg-black">
-                    {(() => {
-                      const displayScreen = remoteScreenStream || (activeScreenSharer ? remoteStreams[activeScreenSharer] : null);
-                      return displayScreen ? (
-                        <video
-                          autoPlay
-                          playsInline
-                          className="w-full h-full object-contain bg-black"
-                          ref={(el) => {
-                            if (el && el.srcObject !== displayScreen) {
-                              el.srcObject = displayScreen;
-                              el.play().catch(() => {});
+                    {remoteScreenStream ? (
+                      <video
+                        ref={(el) => {
+                          remoteScreenVideoRef.current = el;
+                          if (el && remoteScreenStream) {
+                            el.defaultMuted = true;
+                            el.muted = true;
+                            if (el.srcObject !== remoteScreenStream) {
+                              el.srcObject = remoteScreenStream;
                             }
-                          }}
-                        />
-                      ) : (
-                        <div className="flex flex-col items-center justify-center text-center p-8 space-y-4">
-                          <div className="w-16 h-16 rounded-3xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 animate-pulse">
-                            <MonitorUp className="w-8 h-8" />
-                          </div>
-                          <div className="space-y-1">
-                            <h4 className="text-lg font-bold text-white">{activeScreenSharer} is presenting</h4>
-                            <p className="text-xs text-slate-400">Loading screen presentation feed...</p>
-                          </div>
+                            el.play().catch(() => {});
+                          }
+                        }}
+                        autoPlay
+                        playsInline
+                        muted
+                        onLoadedMetadata={(e) => {
+                          (e.target as HTMLVideoElement).play().catch(() => {});
+                        }}
+                        onCanPlay={(e) => {
+                          (e.target as HTMLVideoElement).play().catch(() => {});
+                        }}
+                        className="w-full h-full object-contain bg-black"
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center justify-center text-center p-8 space-y-4">
+                        <div className="w-16 h-16 rounded-3xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 animate-pulse">
+                          <MonitorUp className="w-8 h-8" />
                         </div>
-                      );
-                    })()}
+                        <div className="space-y-1">
+                          <h4 className="text-lg font-bold text-white">{activeScreenSharer} is presenting</h4>
+                          <p className="text-xs text-slate-400">Connecting screen presentation feed...</p>
+                        </div>
+                      </div>
+                    )}
                     <div className="absolute top-3 left-3 bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
                       <MonitorUp className="w-4 h-4 text-blue-400 animate-pulse" />
                       <span>{activeScreenSharer} is presenting</span>
@@ -3033,7 +3069,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 {/* Other Remote Participants */}
                 {otherParticipants.map((participant) => {
                   const isSharer = participant.name === activeScreenSharer;
-                  const remoteStream = isSharer ? null : remoteStreams[participant.name];
+                  const remoteStream = remoteStreams[participant.name];
                   const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                   const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
 
@@ -3042,45 +3078,43 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       key={participant.id}
                       className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center group"
                     >
-                      {isSharer ? (
-                        /* Presenter Sidebar Card (Never show duplicate screen in tiny window) */
-                        <div className="flex flex-col items-center justify-center gap-2 p-3 text-center">
-                          <div className="relative w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-600 text-white flex items-center justify-center shadow-lg">
-                            <MonitorUp className="w-6 h-6 text-white animate-pulse" />
-                            <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-400 rounded-full border-2 border-slate-900" />
-                          </div>
-                          <div className="space-y-0.5">
-                            <div className="text-xs font-bold text-white truncate max-w-[140px]">{participant.name}</div>
-                            <div className="inline-flex items-center gap-1 text-[10px] text-blue-400 font-semibold bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-full">
-                              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping" />
+                      {remoteStream && !isVideoStopped ? (
+                        <>
+                          <video
+                            autoPlay
+                            playsInline
+                            muted={isAudioMuted}
+                            className="w-full h-full object-cover"
+                            ref={(el) => {
+                              if (el) {
+                                el.defaultMuted = isAudioMuted;
+                                el.muted = isAudioMuted;
+                                if (el.srcObject !== remoteStream) {
+                                  el.srcObject = remoteStream;
+                                }
+                                el.play().catch(() => {});
+                              }
+                            }}
+                          />
+                          {isSharer && (
+                            <div className="absolute top-2 left-2 bg-blue-600/90 backdrop-blur-md text-white px-2 py-0.5 rounded-lg text-[10px] font-bold flex items-center gap-1 shadow-md z-10 border border-white/20">
+                              <MonitorUp className="w-3 h-3 animate-pulse" />
                               <span>Presenting</span>
                             </div>
-                          </div>
-                        </div>
-                      ) : remoteStream && !isVideoStopped ? (
-                        <video
-                          autoPlay
-                          playsInline
-                          muted={isAudioMuted}
-                          className="w-full h-full object-cover"
-                          ref={(el) => {
-                            if (el && el.srcObject !== remoteStream) {
-                              el.srcObject = remoteStream;
-                              el.play().catch(() => {});
-                            }
-                            if (el) {
-                              el.muted = isAudioMuted;
-                            }
-                          }}
-                        />
+                          )}
+                        </>
                       ) : (
                         <div className="flex flex-col items-center gap-1.5">
                           <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white text-base font-bold flex items-center justify-center shadow-lg">
                             {participant.name.slice(0, 2).toUpperCase()}
                           </div>
-                          <span className="text-[10px] text-slate-400">
-                            {isVideoStopped ? 'Camera off' : 'Connected'}
-                          </span>
+                          <span className="text-[11px] text-slate-400 font-medium">{participant.name}</span>
+                          {isSharer && (
+                            <div className="inline-flex items-center gap-1 text-[10px] text-blue-400 font-semibold bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-full mt-0.5">
+                              <MonitorUp className="w-2.5 h-2.5" />
+                              <span>Presenting</span>
+                            </div>
+                          )}
                         </div>
                       )}
 
