@@ -78,6 +78,36 @@ import {
 } from '@/lib/supabaseClient';
 import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track } from 'livekit-client';
 
+// Helper to format spoken speech into clean, readable lines within paragraphs
+function formatSpokenText(text: string, maxLineLength = 65): string {
+  if (!text) return '';
+  const paragraphs = text.split('\n');
+  return paragraphs
+    .map((paragraph) => {
+      const words = paragraph.trim().split(/\s+/);
+      if (words.length === 0) return '';
+      const lines: string[] = [];
+      let currentLine = '';
+
+      for (const word of words) {
+        if (!currentLine) {
+          currentLine = word;
+        } else if (
+          currentLine.length + 1 + word.length > maxLineLength &&
+          currentLine.length >= 35
+        ) {
+          lines.push(currentLine);
+          currentLine = word;
+        } else {
+          currentLine += ' ' + word;
+        }
+      }
+      if (currentLine) lines.push(currentLine);
+      return lines.join('\n');
+    })
+    .join('\n');
+}
+
 function MeetContent({ params }: { params: { meetingId: string } }) {
   const { meetingId } = params;
   const router = useRouter();
@@ -2193,15 +2223,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
           setMeetingNotes((prev) => {
             const lastNote = prev[prev.length - 1];
-            // If the same speaker spoke within the last 8 seconds, seamlessly merge to build complete continuous sentences!
+            // If the same speaker spoke within the last 8 seconds, seamlessly merge and move to next line after a certain length!
             if (
               lastNote &&
               lastNote.speaker.trim().toLowerCase() === myName.toLowerCase() &&
               (now - lastNote.timestamp) < 8000
             ) {
+              const prevText = lastNote.text.trim();
+              const lastLine = prevText.split('\n').pop() || '';
+              // Move to the next line if the current line exceeds 65 characters
+              const separator = (lastLine.length + trimmedFinal.length > 65) ? '\n' : ' ';
               const updatedNote = {
                 ...lastNote,
-                text: `${lastNote.text.trim()} ${trimmedFinal}`,
+                text: `${prevText}${separator}${trimmedFinal}`,
                 time: timeStr,
                 timestamp: now,
               };
@@ -4537,10 +4571,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 transition: sheetOffsetY === 0 ? 'transform 0.25s cubic-bezier(0.32, 0.72, 0, 1)' : 'none',
               }}
               className={`
-                fixed inset-x-0 bottom-0 z-50 sm:relative sm:inset-auto sm:w-88 sm:h-auto 
+                fixed inset-x-0 bottom-0 z-50 sm:relative sm:inset-auto sm:w-[380px] lg:w-[420px] sm:max-w-[440px] sm:h-auto shrink-0
                 bg-slate-950/98 sm:bg-slate-900/98 backdrop-blur-2xl border-t sm:border-t-0 sm:border-l border-slate-800 
                 flex flex-col rounded-t-3xl sm:rounded-none max-h-[85vh] sm:max-h-full shadow-2xl 
-                sheet-spring-up sm:animate-in sm:slide-in-from-right duration-250 pb-safe touch-scroll-smooth
+                sheet-spring-up sm:animate-in sm:slide-in-from-right duration-250 pb-safe touch-scroll-smooth overflow-hidden
               `}
             >
               {/* Mobile Drag Indicator (Touch Gesture Dismiss) */}
@@ -5061,9 +5095,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                               </div>
                               <span className="text-[10px] text-slate-500 font-mono">{note.time}</span>
                             </div>
-                            <div className="text-xs text-slate-200 leading-relaxed font-sans pl-3 border-l-2 border-slate-700/70 break-words">
-                              <span className="font-bold text-slate-300">{note.speaker} : </span>
-                              <span className="text-slate-100">&ldquo;{note.text}&rdquo;</span>
+                            <div className="text-xs text-slate-200 leading-relaxed font-sans pl-3 border-l-2 border-slate-700/70 break-words whitespace-pre-line">
+                              <div className="font-bold text-slate-300 mb-1">{note.speaker} :</div>
+                              <div className="text-slate-100 pl-0.5">&ldquo;{formatSpokenText(note.text)}&rdquo;</div>
                             </div>
                           </div>
                         );
@@ -5088,9 +5122,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                             Live
                           </span>
                         </div>
-                        <div className="text-xs text-blue-100 italic leading-relaxed pl-3 border-l-2 border-blue-400/80 break-words">
-                          <span className="font-bold text-blue-300">{interimTranscript.speaker} : </span>
-                          <span>&ldquo;{interimTranscript.text}&rdquo;</span>
+                        <div className="text-xs text-blue-100 italic leading-relaxed pl-3 border-l-2 border-blue-400/80 break-words whitespace-pre-line">
+                          <div className="font-bold text-blue-300 not-italic mb-1">{interimTranscript.speaker} :</div>
+                          <div className="pl-0.5 text-blue-100">&ldquo;{formatSpokenText(interimTranscript.text)}&rdquo;</div>
                         </div>
                       </div>
                     )}
