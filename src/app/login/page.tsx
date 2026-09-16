@@ -29,11 +29,12 @@ export default function LoginPage() {
         },
       });
       if (error) {
-        // Fallback for mock/local sandbox
-        setTimeout(() => router.push('/dashboard'), 600);
+        setErrorMsg(error.message);
+        setLoading(false);
       }
-    } catch {
-      setTimeout(() => router.push('/dashboard'), 600);
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Google sign-in failed.');
+      setLoading(false);
     }
   };
 
@@ -51,15 +52,13 @@ export default function LoginPage() {
         },
       });
       if (error) {
-        // Mock fallback so testing works smoothly
-        setStep('otp');
-        setSuccessMsg(`Code sent to ${email}`);
+        setErrorMsg(error.message);
       } else {
         setStep('otp');
         setSuccessMsg(`Verification code sent to ${email}`);
       }
-    } catch {
-      setStep('otp');
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Unable to send the verification code.');
     } finally {
       setLoading(false);
     }
@@ -92,13 +91,12 @@ export default function LoginPage() {
         type: 'email',
       });
       if (error) {
-        // Mock fallback to allow demo dashboard navigation
-        router.push('/dashboard');
+        setErrorMsg(error.message);
       } else {
         router.push('/dashboard');
       }
-    } catch {
-      router.push('/dashboard');
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Verification failed.');
     } finally {
       setLoading(false);
     }

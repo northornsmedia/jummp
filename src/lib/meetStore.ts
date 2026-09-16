@@ -1,13 +1,6 @@
 import { supabase } from '@/lib/supabaseClient';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
-export function generateMeetingId(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz';
-  const pick = (len: number) =>
-    Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-  return `jmp-${pick(4)}-${pick(3)}`;
-}
-
 export function parseMeetingId(input: string): string {
   let cleaned = input.trim();
   if (cleaned.includes('/meet/')) {
@@ -95,29 +88,6 @@ export function getScheduledMeetings(): ScheduledMeeting[] {
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
-  }
-}
-
-export function registerCreatedMeeting(meetingId: string) {
-  if (typeof window === 'undefined') return;
-  try {
-    const raw = localStorage.getItem('jummp_created_meetings');
-    const list: string[] = raw ? JSON.parse(raw) : [];
-    if (!list.includes(meetingId)) {
-      list.push(meetingId);
-      localStorage.setItem('jummp_created_meetings', JSON.stringify(list.slice(-50)));
-    }
-  } catch {}
-}
-
-export function isMeetingCreator(meetingId: string): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    const raw = localStorage.getItem('jummp_created_meetings');
-    const list: string[] = raw ? JSON.parse(raw) : [];
-    return list.includes(meetingId);
-  } catch {
-    return false;
   }
 }
 

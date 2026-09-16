@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, Suspense, useCallback } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import {
   Mic,
   MicOff,
@@ -55,18 +55,18 @@ import {
   playChime,
   formatTimeAgo,
   createAudioVisualizer,
-  generateMeetingId,
-  isMeetingCreator,
-  registerCreatedMeeting,
   triggerHaptic,
 } from '@/lib/meetStore';
+import {
+  createAnonymousMeeting,
+  getHostCapability,
+  verifyHostCapability,
+} from '@/lib/meetingSession';
 import {
   createOrGetMeeting,
   saveChatMessage,
   getMeetingMessages,
   checkMeetingStatus,
-  updateMeetingHeartbeat,
-  endMeeting,
   DBMeeting,
   MeetingStatusCheck,
 } from '@/lib/supabaseClient';
@@ -75,8 +75,6 @@ import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track } from 'livekit-
 function MeetContent({ params }: { params: { meetingId: string } }) {
   const { meetingId } = params;
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const isHostQuery = searchParams.get('host') === 'true';
 
   // Meeting Lifecycle & Status
   const [statusCheck, setStatusCheck] = useState<MeetingStatusCheck | null>(null);
@@ -136,6 +134,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // Remote WebRTC Streams & Screen Sharing
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
   const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
+  const localScreenStreamRef = useRef<MediaStream | null>(null);
   const remoteScreenTrackIdRef = useRef<string | null>(null);
   const remoteScreenStreamIdRef = useRef<string | null>(null);
   const activeScreenSharerRef = useRef<string | null>(null);
@@ -143,6 +142,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const remoteWebcamTracksRef = useRef<Record<string, MediaStreamTrack>>({});
   const remoteScreenStreamRef = useRef<MediaStream | null>(null);
   const screenSendersRef = useRef<Record<string, RTCRtpSender>>({});
+  const screenAudioSendersRef = useRef<Record<string, RTCRtpSender>>({});
   const pendingCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const peerConnectionsRef = useRef<Record<string, RTCPeerConnection>>({});
 
@@ -150,7 +150,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const livekitRoomRef = useRef<Room | null>(null);
 
   // Meeting State
-  const [isHost, setIsHost] = useState(isHostQuery);
+  const [isHost, setIsHost] = useState(false);
+  const [hostToken, setHostToken] = useState<string | null>(null);
+  const [hostResolved, setHostResolved] = useState(false);
+  const [admissionToken, setAdmissionToken] = useState<string | null>(null);
+  const [participantId] = useState(() => crypto.randomUUID());
+  const [transportMode, setTransportMode] = useState<'checking' | 'livekit' | 'p2p'>('checking');
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [pendingRequests, setPendingRequests] = useState<JoinRequest[]>([]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -166,6 +171,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [unreadChat, setUnreadChat] = useState(false);
   const [isMinimizedPip, setIsMinimizedPip] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const latestMeetingStateRef = useRef({
+    activePanel,
+    participants,
+    micEnabled,
+    camEnabled,
+    handRaised,
+    isScreenSharing,
+    isRecording,
+  });
+  latestMeetingStateRef.current = {
+    activePanel,
+    participants,
+    micEnabled,
+    camEnabled,
+    handRaised,
+    isScreenSharing,
+    isRecording,
+  };
 
   // Google Meet / Apple Floating Toast Notification
   const [toastNotification, setToastNotification] = useState<{
@@ -208,11 +231,48 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   const channelRef = useRef<MeetChannel | null>(null);
+  const handleLeaveCallRef = useRef<() => void>(() => {});
+
+  const sendHostEvent = useCallback(
+    async (type: string, payload: Record<string, unknown>) => {
+      if (!hostToken || !channelRef.current) return false;
+      const response = await fetch('/api/meet/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room: meetingId, hostToken, type, payload }),
+      });
+      const auth = await response.json();
+      if (!response.ok || !auth.signature) return false;
+      channelRef.current.send(type, {
+        ...payload,
+        _hostAuth: { issuedAt: auth.issuedAt, signature: auth.signature },
+      });
+      return true;
+    },
+    [meetingId, hostToken]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const resolveHost = async () => {
+      const token = getHostCapability(meetingId);
+      const valid = token ? await verifyHostCapability(meetingId, token).catch(() => false) : false;
+      if (cancelled) return;
+      setHostToken(valid ? token : null);
+      setIsHost(valid);
+      setHostResolved(true);
+    };
+    resolveHost();
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingId]);
 
   // =========================================================================
   // 1. INITIALIZE STATUS & DATABASE RECORD (Handles Inactivity & Weeks-Old Links)
   // =========================================================================
   useEffect(() => {
+    if (!hostResolved) return;
     let isMounted = true;
 
     async function initStatus() {
@@ -222,15 +282,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       setStatusCheck(check);
       setIsCheckingStatus(false);
 
-      // Auto-recognize meeting creator as Host without requiring login
-      const creator = isMeetingCreator(meetingId);
-      if (isHostQuery || creator) {
-        setIsHost(true);
-      }
-
-      // If link is valid or ready, register/update in Supabase
-      if (!check.isExpired) {
-        const meeting = await createOrGetMeeting(meetingId, isHostQuery || creator ? 'Host' : 'Guest');
+      // Anonymous hosts create the database record. Guests can inspect it but never
+      // create or reactivate a room merely by opening an invitation link.
+      if (isHost && !check.isExpired && !check.isEnded) {
+        const meeting = await createOrGetMeeting(meetingId, 'Host');
         if (meeting && isMounted) {
           setDbMeeting(meeting);
           const messages = await getMeetingMessages(meeting.id);
@@ -245,6 +300,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             );
           }
         }
+      } else if (check.meeting && isMounted) {
+        setDbMeeting(check.meeting);
       }
     }
 
@@ -253,18 +310,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     return () => {
       isMounted = false;
     };
-  }, [meetingId, isHostQuery]);
+  }, [meetingId, hostResolved, isHost]);
 
   // Keep localStreamRef synced
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
 
+  useEffect(() => {
+    localScreenStreamRef.current = screenStream;
+  }, [screenStream]);
+
   // =========================================================================
   // BACKEND HEARTBEAT & 10-MINUTE INACTIVITY SYNC (Robust Supabase API)
   // =========================================================================
   useEffect(() => {
     if (!inCall) return;
+    const credential = isHost ? hostToken : admissionToken;
+    if (!credential) return;
 
     const sendBackendHeartbeat = async (action: 'heartbeat' | 'leave' = 'heartbeat') => {
       try {
@@ -274,18 +337,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           body: JSON.stringify({
             code: meetingId,
             participantName: userName || (isHost ? 'Host' : 'Guest'),
-            isHost,
             action,
+            credential,
           }),
         });
         const data = await res.json();
         if (data.isInactiveEnded && !isHost) {
           showToast('Meeting Inactive', 'Room closed after 10 minutes of inactivity.', 'info');
         }
-      } catch (e) {
-        if (dbMeeting) {
-          updateMeetingHeartbeat(dbMeeting.id);
-        }
+      } catch (error) {
+        console.warn('Meeting heartbeat failed:', error);
       }
     };
 
@@ -299,7 +360,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       clearInterval(interval);
       sendBackendHeartbeat('leave');
     };
-  }, [inCall, meetingId, userName, isHost, dbMeeting, showToast]);
+  }, [inCall, meetingId, userName, isHost, hostToken, admissionToken, showToast]);
 
   // =========================================================================
   // 10-MINUTE ALONE INACTIVITY WATCHDOG ("Are you still here?")
@@ -347,7 +408,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       setStillHereCountdown((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          handleLeaveCall();
+          handleLeaveCallRef.current();
           return 0;
         }
         return prev - 1;
@@ -367,8 +428,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       body: JSON.stringify({
         code: meetingId,
         participantName: userName || (isHost ? 'Host' : 'Guest'),
-        isHost,
         action: 'keepalive',
+        credential: isHost ? hostToken : admissionToken,
       }),
     }).catch(() => {});
     showToast('Meeting Active', 'You are still in the call. Inactivity timer reset.', 'info');
@@ -542,20 +603,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   // =========================================================================
-  // 2. IN-CALL HEARTBEAT (Keeps room alive and tracks activity in Supabase)
-  // =========================================================================
-  useEffect(() => {
-    if (!inCall || !dbMeeting) return;
-
-    // Send heartbeat every 20 seconds
-    const interval = setInterval(() => {
-      updateMeetingHeartbeat(dbMeeting.id);
-    }, 20000);
-
-    return () => clearInterval(interval);
-  }, [inCall, dbMeeting]);
-
-  // =========================================================================
   // 3. AUDIO VISUALIZER (Real-time voice activity detection)
   // =========================================================================
   useEffect(() => {
@@ -588,6 +635,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           audio: micEnabled ? { echoCancellation: true, noiseSuppression: true } : false,
         });
 
+        const previousStream = localStreamRef.current;
+        if (previousStream && previousStream !== stream) {
+          previousStream.getTracks().forEach((track) => track.stop());
+        }
         setLocalStream(stream);
         localStreamRef.current = stream;
 
@@ -618,10 +669,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
         // Re-publish to LiveKit if connected
         if (livekitRoomRef.current) {
+          const participant = livekitRoomRef.current.localParticipant;
           const videoTrack = stream.getVideoTracks()[0];
           const audioTrack = stream.getAudioTracks()[0];
-          if (videoTrack) await livekitRoomRef.current.localParticipant.publishTrack(videoTrack);
-          if (audioTrack) await livekitRoomRef.current.localParticipant.publishTrack(audioTrack);
+          const existingVideo = participant.getTrackPublication(Track.Source.Camera)?.track;
+          const existingAudio = participant.getTrackPublication(Track.Source.Microphone)?.track;
+          if (existingVideo) await participant.unpublishTrack(existingVideo);
+          if (existingAudio) await participant.unpublishTrack(existingAudio);
+          if (videoTrack) {
+            await participant.publishTrack(videoTrack, { source: Track.Source.Camera });
+          }
+          if (audioTrack) {
+            await participant.publishTrack(audioTrack, { source: Track.Source.Microphone });
+          }
         }
 
         return stream;
@@ -698,8 +758,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         localStream.getTracks().forEach((t) => t.stop());
         setLocalStream(null);
       }
-      if (screenStream) {
-        screenStream.getTracks().forEach((t) => t.stop());
+      if (localScreenStreamRef.current) {
+        localScreenStreamRef.current.getTracks().forEach((t) => t.stop());
+        localScreenStreamRef.current = null;
         setScreenStream(null);
       }
       if (recordingStreamRef.current) {
@@ -714,8 +775,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
       }
-      if (screenStream) {
-        screenStream.getTracks().forEach((t) => t.stop());
+      if (localScreenStreamRef.current) {
+        localScreenStreamRef.current.getTracks().forEach((t) => t.stop());
+        localScreenStreamRef.current = null;
       }
       if (recordingStreamRef.current) {
         recordingStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -777,9 +839,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               }
 
               // Update WebRTC peer tracks if in P2P mode
-              Object.values(peerConnectionsRef.current).forEach((pc) => {
+              Object.entries(peerConnectionsRef.current).forEach(([peerName, pc]) => {
                 freshStream.getTracks().forEach((track) => {
-                  const sender = pc.getSenders().find((s) => s.track?.kind === track.kind);
+                  const sender = pc.getSenders().find(
+                    (candidate) =>
+                      candidate.track?.kind === track.kind &&
+                      candidate !== screenSendersRef.current[peerName] &&
+                      candidate !== screenAudioSendersRef.current[peerName]
+                  );
                   if (sender) {
                     sender.replaceTrack(track).catch(() => {});
                   } else {
@@ -794,7 +861,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         }
 
         // 4. WebRTC ICE Self-Healing: Reconnect any peer connections broken by background sleep
-        Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+        if (transportMode !== 'livekit') Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
           const isBadState =
             pc.iceConnectionState === 'disconnected' ||
             pc.iceConnectionState === 'failed' ||
@@ -826,7 +893,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             console.log('LiveKit room disconnected during background. Triggering reconnection...');
             try {
               const name = userName || (isHost ? 'Host' : 'Guest');
-              const res = await fetch(`/api/livekit/token?room=${meetingId}&username=${encodeURIComponent(name)}`);
+              const credential = isHost ? hostToken : admissionToken;
+              if (!credential) return;
+              const res = await fetch('/api/livekit/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ room: meetingId, username: name, credential }),
+              });
               const data = await res.json();
               if (data.configured && data.token && data.url) {
                 await room.connect(data.url, data.token);
@@ -869,7 +942,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       document.removeEventListener('visibilitychange', handleForegroundReturn);
       window.removeEventListener('pageshow', handleForegroundReturn);
     };
-  }, [acquireMedia, camEnabled, micEnabled, inCall, userName, isHost, meetingId]);
+  }, [acquireMedia, camEnabled, micEnabled, inCall, userName, isHost, meetingId, hostToken, admissionToken, showStillHereModal, transportMode]);
 
   // One-tap resume if browser blocked autoplay upon returning
   const handleUserGestureResume = () => {
@@ -891,11 +964,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     async function connectLiveKit() {
       try {
         const name = userName || (isHost ? 'Host' : 'Guest');
-        const res = await fetch(`/api/livekit/token?room=${meetingId}&username=${encodeURIComponent(name)}`);
+        const credential = isHost ? hostToken : admissionToken;
+        if (!credential) return;
+        const res = await fetch('/api/livekit/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ room: meetingId, username: name, credential }),
+        });
         const data = await res.json();
         if (isCleanedUp) return;
 
         if (data.configured && data.token && data.url) {
+          setTransportMode('livekit');
           const room = new Room({
             adaptiveStream: true,
             dynacast: true,
@@ -903,18 +983,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           livekitRoomRef.current = room;
 
           room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub, participant: RemoteParticipant) => {
+            const displayName = participant.name || participant.identity;
             if (track.kind === Track.Kind.Video) {
               const stream = new MediaStream([track.mediaStreamTrack]);
               if ((pub as any).source === Track.Source.ScreenShare) {
                 remoteScreenStreamRef.current = stream;
                 setRemoteScreenStream(stream);
-                setActiveScreenSharer(participant.identity);
-                activeScreenSharerRef.current = participant.identity;
+                setActiveScreenSharer(displayName);
+                activeScreenSharerRef.current = displayName;
               } else {
-                remoteStreamsRef.current[participant.identity] = stream;
+                remoteStreamsRef.current[displayName] = stream;
                 setRemoteStreams((prev) => ({
                   ...prev,
-                  [participant.identity]: stream,
+                  [displayName]: stream,
                 }));
               }
             } else if (track.kind === Track.Kind.Audio) {
@@ -931,13 +1012,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           });
 
           room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
+            const displayName = participant.name || participant.identity;
             setParticipants((prev) => {
-              if (prev.some((p) => p.name === participant.identity)) return prev;
+              if (prev.some((p) => p.id === participant.identity)) return prev;
               return [
                 ...prev,
                 {
-                  id: participant.sid,
-                  name: participant.identity,
+                  id: participant.identity,
+                  name: displayName,
                   isHost: false,
                   audioEnabled: true,
                   videoEnabled: true,
@@ -950,11 +1032,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           });
 
           room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
+            const displayName = participant.name || participant.identity;
             setRemoteStreams((prev) => {
               const next = { ...prev };
-              delete next[participant.identity];
+              delete next[displayName];
               return next;
             });
+            delete remoteStreamsRef.current[displayName];
+            setParticipants((prev) => prev.filter((p) => p.id !== participant.identity));
             const audioEl = document.getElementById(`livekit-audio-${participant.identity}`);
             if (audioEl) audioEl.remove();
           });
@@ -964,12 +1049,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           if (localStreamRef.current) {
             const videoTrack = localStreamRef.current.getVideoTracks()[0];
             const audioTrack = localStreamRef.current.getAudioTracks()[0];
-            if (videoTrack) await room.localParticipant.publishTrack(videoTrack);
-            if (audioTrack) await room.localParticipant.publishTrack(audioTrack);
+            if (videoTrack) {
+              await room.localParticipant.publishTrack(videoTrack, { source: Track.Source.Camera });
+            }
+            if (audioTrack) {
+              await room.localParticipant.publishTrack(audioTrack, { source: Track.Source.Microphone });
+            }
           }
+        } else {
+          setTransportMode('p2p');
         }
       } catch (e) {
         console.warn('LiveKit SFU initialization fallback to P2P WebRTC:', e);
+        if (!isCleanedUp) setTransportMode('p2p');
       }
     }
 
@@ -982,7 +1074,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         livekitRoomRef.current = null;
       }
     };
-  }, [inCall, meetingId, userName, isHost]);
+  }, [inCall, meetingId, userName, isHost, hostToken, admissionToken]);
 
   // Update in-call video ref when inCall state changes
   useEffect(() => {
@@ -1031,7 +1123,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // =========================================================================
   // 7. WEBRTC P2P FALLBACK (Zero-config peer mesh)
   // =========================================================================
-  const createPeerConnection = (targetName: string) => {
+  const createPeerConnection = useCallback((targetName: string) => {
     if (peerConnectionsRef.current[targetName]) {
       return peerConnectionsRef.current[targetName];
     }
@@ -1054,11 +1146,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
 
     // Attach active screen share track if currently presenting
-    if (screenStream && isScreenSharing) {
-      const screenTrack = screenStream.getVideoTracks()[0];
+    const activeLocalScreen = localScreenStreamRef.current;
+    if (activeLocalScreen) {
+      const screenTrack = activeLocalScreen.getVideoTracks()[0];
       if (screenTrack) {
-        const sender = pc.addTrack(screenTrack, screenStream);
+        const sender = pc.addTrack(screenTrack, activeLocalScreen);
         screenSendersRef.current[targetName] = sender;
+      }
+      const screenAudioTrack = activeLocalScreen.getAudioTracks()[0];
+      if (screenAudioTrack) {
+        screenAudioSendersRef.current[targetName] = pc.addTrack(screenAudioTrack, activeLocalScreen);
       }
     }
 
@@ -1180,7 +1277,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     (pc as any)._targetPeer = targetName;
     peerConnectionsRef.current[targetName] = pc;
     return pc;
-  };
+  }, [isHost, userName]);
 
   // =========================================================================
   // 8. REAL-TIME SIGNALING CHANNEL (Supabase WebSockets + BroadcastChannel)
@@ -1189,9 +1286,37 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     const handleChannelMessage = async (msg: any) => {
       if (!msg || msg.meetingId !== meetingId) return;
 
+      const hostOnlyEvents = new Set([
+        'HOST_PONG',
+        'HOST_ARRIVED',
+        'ADMIT_GUEST',
+        'DENY_GUEST',
+        'MUTE_PARTICIPANT_AUDIO',
+        'MUTE_ALL_AUDIO',
+        'STOP_PARTICIPANT_VIDEO',
+        'STOP_ALL_VIDEO',
+      ]);
+      if (hostOnlyEvents.has(msg.type)) {
+        const { _hostAuth, ...trustedPayload } = msg.payload || {};
+        if (!_hostAuth?.signature || typeof _hostAuth?.issuedAt !== 'number') return;
+        const verification = await fetch('/api/meet/event', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            room: meetingId,
+            type: msg.type,
+            payload: trustedPayload,
+            issuedAt: _hostAuth.issuedAt,
+            signature: _hostAuth.signature,
+          }),
+        });
+        if (!verification.ok) return;
+        msg = { ...msg, payload: trustedPayload };
+      }
+
       if (msg.type === 'PING_HOST') {
         if (isHost && inCall) {
-          channelRef.current?.send('HOST_PONG', { hostName: userName || 'Host' });
+          void sendHostEvent('HOST_PONG', { hostName: userName || 'Host' });
         }
       } else if (msg.type === 'HOST_PONG' || msg.type === 'HOST_ARRIVED') {
         setHostInMeeting(true);
@@ -1204,18 +1329,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           ]);
         }
       } else if (msg.type === 'ADMIT_GUEST') {
-        const guestTarget = msg.payload.guestName;
-        if (guestTarget === userName || msg.payload.guestId === userName) {
+        if (msg.payload.guestId === participantId && typeof msg.payload.admissionToken === 'string') {
           playChime('admit');
+          setAdmissionToken(msg.payload.admissionToken);
           setWaitingToJoin(false);
           setInCall(true);
 
           const myParticipant: Participant = {
-            id: 'guest-' + Date.now(),
+            id: participantId,
             name: userName || 'Guest',
             isHost: false,
-            audioEnabled: micEnabled,
-            videoEnabled: camEnabled,
+            audioEnabled: latestMeetingStateRef.current.micEnabled,
+            videoEnabled: latestMeetingStateRef.current.camEnabled,
             handRaised: false,
             isScreenSharing: false,
             joinedAt: Date.now(),
@@ -1249,14 +1374,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           channelRef.current?.send('USER_JOINED', myParticipant);
         }
       } else if (msg.type === 'DENY_GUEST') {
-        if (msg.payload.guestName === userName || msg.payload.guestId === userName) {
+        if (msg.payload.guestId === participantId) {
           setWaitingToJoin(false);
           setDenied(true);
         }
       } else if (msg.type === 'CHAT_MESSAGE') {
         setChatMessages((prev) => [...prev, msg.payload]);
         playChime('chat');
-        if (activePanel !== 'chat') {
+        if (latestMeetingStateRef.current.activePanel !== 'chat') {
           setUnreadChat(true);
           showToast(msg.payload.sender, msg.payload.text, 'chat');
         }
@@ -1270,10 +1395,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         remoteScreenStreamIdRef.current = msg.payload?.streamId || null;
 
         // If another person starts presenting while we are presenting, stop ours
-        if (isScreenSharing && sharer !== (userName || (isHost ? 'Host' : 'Guest'))) {
-          if (screenStream) {
-            screenStream.getTracks().forEach((t) => t.stop());
+        if (localScreenStreamRef.current && sharer !== (userName || (isHost ? 'Host' : 'Guest'))) {
+          if (localScreenStreamRef.current) {
+            localScreenStreamRef.current.getTracks().forEach((t) => t.stop());
           }
+          localScreenStreamRef.current = null;
           setScreenStream(null);
           setIsScreenSharing(false);
         }
@@ -1299,39 +1425,40 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           channelRef.current?.send('ROOM_ROSTER', {
             to: joinedP.name,
             participants: [
-              ...participants.filter((p) => p.name !== joinedP.name),
+              ...latestMeetingStateRef.current.participants.filter((p) => p.name !== joinedP.name),
               {
                 id: 'self-' + myName,
                 name: myName,
                 isHost,
-                audioEnabled: micEnabled,
-                videoEnabled: camEnabled,
-                handRaised,
-                isScreenSharing,
+                audioEnabled: latestMeetingStateRef.current.micEnabled,
+                videoEnabled: latestMeetingStateRef.current.camEnabled,
+                handRaised: latestMeetingStateRef.current.handRaised,
+                isScreenSharing: latestMeetingStateRef.current.isScreenSharing,
                 joinedAt: Date.now(),
               },
             ],
           });
 
           // If we are currently sharing screen, send SCREEN_SHARE_STARTED to new user
-          if (isScreenSharing && screenStream) {
-            const screenTrack = screenStream.getVideoTracks()[0];
+          const activeLocalScreen = localScreenStreamRef.current;
+          if (activeLocalScreen) {
+            const screenTrack = activeLocalScreen.getVideoTracks()[0];
             channelRef.current?.send('SCREEN_SHARE_STARTED', {
               sharerName: myName,
-              streamId: screenStream.id,
+              streamId: activeLocalScreen.id,
               trackId: screenTrack?.id,
             });
           }
 
           // If we are currently recording, sync RECORDING_STATUS to new user
-          if (isRecording) {
+          if (latestMeetingStateRef.current.isRecording) {
             channelRef.current?.send('RECORDING_STATUS', {
               isRecording: true,
               recorderName: myName,
             });
           }
 
-          try {
+          if (transportMode !== 'livekit') try {
             const pc = createPeerConnection(joinedP.name);
             // Ensure camera/mic tracks are attached
             if (localStreamRef.current) {
@@ -1343,11 +1470,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               });
             }
             // Ensure screen track is attached if screen sharing
-            if (screenStream && isScreenSharing) {
-              const screenTrack = screenStream.getVideoTracks()[0];
+            if (activeLocalScreen) {
+              const screenTrack = activeLocalScreen.getVideoTracks()[0];
               if (screenTrack) {
-                const sender = pc.addTrack(screenTrack, screenStream);
+                const sender = pc.addTrack(screenTrack, activeLocalScreen);
                 screenSendersRef.current[joinedP.name] = sender;
+              }
+              const screenAudioTrack = activeLocalScreen.getAudioTracks()[0];
+              if (screenAudioTrack) {
+                screenAudioSendersRef.current[joinedP.name] = pc.addTrack(
+                  screenAudioTrack,
+                  activeLocalScreen
+                );
               }
             }
 
@@ -1382,6 +1516,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           delete peerConnectionsRef.current[msg.payload.name];
         }
         delete screenSendersRef.current[msg.payload.name];
+        delete screenAudioSendersRef.current[msg.payload.name];
         delete pendingCandidatesRef.current[msg.payload.name];
         setRemoteStreams((prev) => {
           const next = { ...prev };
@@ -1515,7 +1650,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         }
       } else if (msg.type === 'PEER_RESYNC') {
         // A peer just returned from another app / lock screen
-        if (inCall && msg.payload.name !== userName) {
+        if (transportMode !== 'livekit' && inCall && msg.payload.name !== userName) {
           try {
             const pc = createPeerConnection(msg.payload.name);
             const offer = await pc.createOffer({ iceRestart: true });
@@ -1529,6 +1664,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           } catch {}
         }
       } else if (msg.type === 'WEBRTC_SIGNAL') {
+        if (transportMode === 'livekit') return;
         const { from, to, type, sdp, candidate } = msg.payload;
         const myName = userName || (isHost ? 'Host' : 'Guest');
         if (to !== myName) return;
@@ -1645,8 +1781,22 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       channel.close();
       window.removeEventListener('storage', handleStorage);
       Object.values(peerConnectionsRef.current).forEach((pc) => pc.close());
+      peerConnectionsRef.current = {};
+      screenSendersRef.current = {};
+      screenAudioSendersRef.current = {};
+      pendingCandidatesRef.current = {};
     };
-  }, [meetingId, isHost, userName, inCall, activePanel, micEnabled, camEnabled]);
+  }, [
+    meetingId,
+    isHost,
+    userName,
+    inCall,
+    transportMode,
+    participantId,
+    sendHostEvent,
+    createPeerConnection,
+    showToast,
+  ]);
 
   // Toggle Camera
   const toggleCam = async () => {
@@ -1684,9 +1834,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             liveTrack = freshTrack;
 
             // Update all WebRTC peer connections with the fresh video track
-            Object.values(peerConnectionsRef.current).forEach(async (pc) => {
+            Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
               try {
-                const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
+                const videoSender = pc
+                  .getSenders()
+                  .find(
+                    (sender) =>
+                      sender.track?.kind === 'video' && sender !== screenSendersRef.current[peerName]
+                  );
                 if (videoSender) {
                   await videoSender.replaceTrack(freshTrack);
                 } else {
@@ -1784,9 +1939,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               localStreamRef.current = freshMedia;
               setLocalStream(freshMedia);
             }
-            Object.values(peerConnectionsRef.current).forEach(async (pc) => {
+            Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
               try {
-                const audioSender = pc.getSenders().find((s) => s.track?.kind === 'audio');
+                const audioSender = pc
+                  .getSenders()
+                  .find(
+                    (sender) =>
+                      sender.track?.kind === 'audio' &&
+                      sender !== screenAudioSendersRef.current[peerName]
+                  );
                 if (audioSender) {
                   await audioSender.replaceTrack(freshAudio);
                 } else {
@@ -1831,8 +1992,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     if (isScreenSharing) {
       if (screenStream) {
+        if (livekitRoomRef.current) {
+          screenStream.getTracks().forEach((track) => {
+            livekitRoomRef.current?.localParticipant.unpublishTrack(track);
+          });
+        }
         screenStream.getTracks().forEach((t) => t.stop());
       }
+      localScreenStreamRef.current = null;
       setScreenStream(null);
       setIsScreenSharing(false);
       setShowScreenPreview(false);
@@ -1845,6 +2012,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           if (sender) {
             pc.removeTrack(sender);
             delete screenSendersRef.current[peerName];
+          }
+          const audioSender = screenAudioSendersRef.current[peerName];
+          if (audioSender) {
+            pc.removeTrack(audioSender);
+            delete screenAudioSendersRef.current[peerName];
           }
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
@@ -1875,6 +2047,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           audio: true,
         } as any);
         setScreenStream(stream);
+        localScreenStreamRef.current = stream;
         setIsScreenSharing(true);
         setShowScreenPreview(false);
         setActiveScreenSharer(myName);
@@ -1895,7 +2068,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             }
             const audioTrack = stream.getAudioTracks()[0];
             if (audioTrack) {
-              pc.addTrack(audioTrack, stream);
+              screenAudioSendersRef.current[peerName] = pc.addTrack(audioTrack, stream);
             }
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
@@ -1918,15 +2091,29 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         });
 
         if (livekitRoomRef.current && screenTrack) {
-          await livekitRoomRef.current.localParticipant.publishTrack(screenTrack);
+          await livekitRoomRef.current.localParticipant.publishTrack(screenTrack, {
+            source: Track.Source.ScreenShare,
+          });
+          const screenAudioTrack = stream.getAudioTracks()[0];
+          if (screenAudioTrack) {
+            await livekitRoomRef.current.localParticipant.publishTrack(screenAudioTrack, {
+              source: Track.Source.ScreenShareAudio,
+            });
+          }
         }
 
         // Native browser "Stop sharing" bar click handler
         if (screenTrack) {
           screenTrack.onended = () => {
             if (stream) {
+              if (livekitRoomRef.current) {
+                stream.getTracks().forEach((track) => {
+                  livekitRoomRef.current?.localParticipant.unpublishTrack(track);
+                });
+              }
               stream.getTracks().forEach((t) => t.stop());
             }
+            localScreenStreamRef.current = null;
             setScreenStream(null);
             setIsScreenSharing(false);
             setShowScreenPreview(false);
@@ -1938,6 +2125,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 if (sender) {
                   pc.removeTrack(sender);
                   delete screenSendersRef.current[peerName];
+                }
+                const audioSender = screenAudioSendersRef.current[peerName];
+                if (audioSender) {
+                  pc.removeTrack(audioSender);
+                  delete screenAudioSendersRef.current[peerName];
                 }
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
@@ -1984,7 +2176,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     if (isHost) {
       // Host sends remote mute command
-      channelRef.current?.send('MUTE_PARTICIPANT_AUDIO', {
+      void sendHostEvent('MUTE_PARTICIPANT_AUDIO', {
         targetName: participantName,
         byHost: myName,
       });
@@ -2010,7 +2202,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const handleMuteAllAudio = () => {
     triggerHaptic('heavy');
     const myName = userName || (isHost ? 'Host' : 'Guest');
-    channelRef.current?.send('MUTE_ALL_AUDIO', { byHost: myName });
+    void sendHostEvent('MUTE_ALL_AUDIO', { byHost: myName });
     setParticipants((prev) =>
       prev.map((p) => (!p.isHost ? { ...p, audioEnabled: false } : p))
     );
@@ -2022,7 +2214,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     const myName = userName || (isHost ? 'Host' : 'Guest');
 
     if (isHost) {
-      channelRef.current?.send('STOP_PARTICIPANT_VIDEO', {
+      void sendHostEvent('STOP_PARTICIPANT_VIDEO', {
         targetName: participantName,
         byHost: myName,
       });
@@ -2048,7 +2240,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const handleStopAllVideo = () => {
     triggerHaptic('heavy');
     const myName = userName || (isHost ? 'Host' : 'Guest');
-    channelRef.current?.send('STOP_ALL_VIDEO', { byHost: myName });
+    void sendHostEvent('STOP_ALL_VIDEO', { byHost: myName });
     setParticipants((prev) =>
       prev.map((p) => (!p.isHost ? { ...p, videoEnabled: false } : p))
     );
@@ -2102,14 +2294,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         joinedAt: Date.now(),
       };
       setParticipants((prev) => [...prev.filter((p) => p.name !== name), participant]);
-      channelRef.current?.send('HOST_ARRIVED', { hostName: name });
+      void sendHostEvent('HOST_ARRIVED', { hostName: name });
       channelRef.current?.send('USER_JOINED', participant);
     } else {
       // Guest: Approval is strictly required! No open access bypass.
       playChime('knock');
       setWaitingToJoin(true);
       const req: JoinRequest = {
-        id: 'guest-' + Date.now(),
+        id: participantId,
         name,
         meetingId,
         requestedAt: Date.now(),
@@ -2119,7 +2311,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   // Host Admits Guest - Passes existing roster so newcomer has all participants immediately
-  const handleAdmitGuest = (req: JoinRequest) => {
+  const handleAdmitGuest = async (req: JoinRequest) => {
+    if (!hostToken) return;
+    const response = await fetch('/api/meet/session', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        room: meetingId,
+        hostToken,
+        participantId: req.id,
+        name: req.name,
+      }),
+    });
+    const admission = await response.json();
+    if (!response.ok || !admission.admissionToken) {
+      showToast('Admission failed', admission.error || 'Please try again.', 'info');
+      return;
+    }
     const myName = userName || (isHost ? 'Host' : 'Host');
     setPendingRequests((prev) => prev.filter((r) => r.id !== req.id));
 
@@ -2135,9 +2343,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     };
     setParticipants((prev) => [...prev.filter((p) => p.name !== newParticipant.name), newParticipant]);
 
-    channelRef.current?.send('ADMIT_GUEST', {
+    void sendHostEvent('ADMIT_GUEST', {
       guestName: req.name,
       guestId: req.id,
+      admissionToken: admission.admissionToken,
       hostName: myName,
       existingParticipants: [
         ...participants.filter((p) => p.name !== req.name),
@@ -2148,7 +2357,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Host Denies Guest
   const handleDenyGuest = (req: JoinRequest) => {
-    channelRef.current?.send('DENY_GUEST', { guestName: req.name, guestId: req.id });
+    void sendHostEvent('DENY_GUEST', { guestName: req.name, guestId: req.id });
     setPendingRequests((prev) => prev.filter((r) => r.id !== req.id));
   };
 
@@ -2229,15 +2438,17 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       livekitRoomRef.current.disconnect();
       livekitRoomRef.current = null;
     }
-    if (isHost && dbMeeting) {
-      endMeeting(dbMeeting.id);
-    }
     setHasLeft(true);
     setInCall(false);
   };
+  handleLeaveCallRef.current = handleLeaveCall;
 
   // Reopen Expired or Ended Meeting
   const handleReopenMeeting = async () => {
+    if (!isHost || !hostToken) {
+      showToast('Host access required', 'Only the anonymous creator can reopen this room.', 'info');
+      return;
+    }
     setIsCheckingStatus(true);
     const meeting = await createOrGetMeeting(meetingId, 'Host');
     if (meeting) {
@@ -2253,6 +2464,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       });
       setIsCheckingStatus(false);
       acquireMedia();
+    }
+  };
+
+  const handleStartNewMeeting = async () => {
+    try {
+      const { room } = await createAnonymousMeeting();
+      router.push(`/meet/${room}`);
+    } catch (error) {
+      console.error(error);
+      showToast('Unable to start meeting', 'Please check the server configuration.', 'info');
     }
   };
 
@@ -2358,24 +2579,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="w-full space-y-2.5 pt-2">
             <button
               type="button"
-              onClick={() => {
-                const newCode = generateMeetingId();
-                router.push(`/meet/${newCode}?host=true`);
-              }}
+              onClick={handleStartNewMeeting}
               className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
             >
               <Sparkles className="w-4 h-4" />
               <span>Start a new meeting</span>
             </button>
 
-            <button
-              type="button"
-              onClick={handleReopenMeeting}
-              className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
-            >
-              <RefreshCw className="w-4 h-4" />
-              <span>Reopen this exact room</span>
-            </button>
+            {isHost && (
+              <button
+                type="button"
+                onClick={handleReopenMeeting}
+                className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>Reopen this exact room</span>
+              </button>
+            )}
 
             <Link
               href="/"
@@ -2829,7 +3049,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   </div>
                   <h3 className="text-xl font-extrabold text-white tracking-tight">Are you still in the meeting?</h3>
                   <p className="text-xs text-slate-400 leading-relaxed">
-                    You've been the only participant in this call for 10 minutes. To save bandwidth and battery, this room will end automatically in:
+                    You&apos;ve been the only participant in this call for 10 minutes. To save bandwidth and battery, this room will end automatically in:
                   </p>
                   <div className="pt-2">
                     <span className="text-3xl font-mono font-extrabold text-amber-400 bg-amber-500/10 px-4 py-1.5 rounded-2xl border border-amber-500/20 inline-block shadow-inner">
@@ -2845,7 +3065,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     className="w-full py-3 px-4 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-xs shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
                   >
                     <Check className="w-4 h-4" />
-                    <span>I'm still here (Stay in call)</span>
+                    <span>I&apos;m still here (Stay in call)</span>
                   </button>
 
                   <button
@@ -2961,7 +3181,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           <span>Presentation Live</span>
                         </div>
                         <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
-                          You're presenting to everyone
+                          You&apos;re presenting to everyone
                         </h3>
                         <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
                           Your screen is being broadcasted live to everyone in this call.

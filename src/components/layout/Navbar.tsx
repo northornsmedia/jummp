@@ -5,11 +5,12 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { Menu, X, ArrowRight, Video } from 'lucide-react';
-import { generateMeetingId } from '@/lib/meetStore';
+import { createAnonymousMeeting } from '@/lib/meetingSession';
 
 export default function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [creatingMeeting, setCreatingMeeting] = useState(false);
   const pathname = usePathname();
 
   useEffect(() => {
@@ -31,6 +32,18 @@ export default function Navbar() {
     { name: 'Pricing', href: '/pricing' },
     { name: 'Docs', href: '/docs' },
   ];
+
+  const startAnonymousMeeting = async () => {
+    if (creatingMeeting) return;
+    setCreatingMeeting(true);
+    try {
+      const { room } = await createAnonymousMeeting();
+      window.location.assign(`/meet/${room}`);
+    } catch (error) {
+      console.error(error);
+      setCreatingMeeting(false);
+    }
+  };
 
   return (
     <>
@@ -80,15 +93,13 @@ export default function Navbar() {
             <div className="hidden md:flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => {
-                  const id = generateMeetingId();
-                  window.location.href = `/meet/${id}?host=true`;
-                }}
+                onClick={startAnonymousMeeting}
+                disabled={creatingMeeting}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-blue-200 bg-blue-50/70 text-[#0b5cff] hover:bg-blue-100 font-bold text-xs transition-colors shadow-2xs"
                 title="Start an instant JUMMP Meet video call"
               >
                 <Video className="w-3.5 h-3.5" />
-                <span>Meet</span>
+                <span>{creatingMeeting ? 'Starting…' : 'Meet'}</span>
               </button>
               <Link
                 href="/login"
@@ -141,14 +152,12 @@ export default function Navbar() {
             <div className="pt-3 border-t border-slate-100 flex flex-col gap-2.5">
               <button
                 type="button"
-                onClick={() => {
-                  const id = generateMeetingId();
-                  window.location.href = `/meet/${id}?host=true`;
-                }}
+                onClick={startAnonymousMeeting}
+                disabled={creatingMeeting}
                 className="w-full flex items-center justify-center gap-2 py-2.5 text-xs font-bold text-[#0b5cff] bg-blue-50 hover:bg-blue-100 rounded-xl border border-blue-200 transition-colors"
               >
                 <Video className="w-4 h-4" />
-                <span>Start Instant Meeting</span>
+                <span>{creatingMeeting ? 'Starting…' : 'Start Instant Meeting'}</span>
               </button>
               <Link
                 href="/login"

@@ -120,10 +120,12 @@ function SignupContent() {
         },
       });
       if (error) {
-        setTimeout(() => router.push('/dashboard'), 600);
+        setErrorMsg(error.message);
+        setLoading(false);
       }
-    } catch {
-      setTimeout(() => router.push('/dashboard'), 600);
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Google sign-up failed.');
+      setLoading(false);
     }
   };
 
@@ -133,7 +135,7 @@ function SignupContent() {
     setErrorMsg('');
 
     try {
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
@@ -144,13 +146,14 @@ function SignupContent() {
         },
       });
       if (error) {
-        // Fallback for mock demo environment
-        setTimeout(() => router.push('/dashboard'), 600);
-      } else {
+        setErrorMsg(error.message);
+      } else if (data.session) {
         router.push('/dashboard');
+      } else {
+        setErrorMsg('Check your email to confirm your account before signing in.');
       }
-    } catch {
-      router.push('/dashboard');
+    } catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Unable to create your account.');
     } finally {
       setLoading(false);
     }

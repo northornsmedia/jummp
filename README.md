@@ -18,3 +18,18 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to view the application.
+
+## Environment
+
+Configure these values in `.env.local`:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+NEXT_PUBLIC_LIVEKIT_URL=
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
+MEETING_TOKEN_SECRET=
+```
+
+`MEETING_TOKEN_SECRET` must be a private random value of at least 24 characters. If it is omitted, the server uses `LIVEKIT_API_SECRET`; setting a separate value is recommended in production. Anonymous meetings do not require a user account: the creator receives a browser-stored host capability, while invite links contain no host credential.

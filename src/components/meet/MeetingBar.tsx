@@ -16,14 +16,13 @@ import {
   Clock,
 } from 'lucide-react';
 import {
-  generateMeetingId,
   parseMeetingId,
   getMeetingUrl,
   saveScheduledMeeting,
   getScheduledMeetings,
   ScheduledMeeting,
-  registerCreatedMeeting,
 } from '@/lib/meetStore';
+import { createAnonymousMeeting } from '@/lib/meetingSession';
 
 interface MeetingBarProps {
   className?: string;
@@ -38,6 +37,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
 
   const [generatedMeetingId, setGeneratedMeetingId] = useState('');
   const [copied, setCopied] = useState(false);
+  const [creatingMeeting, setCreatingMeeting] = useState(false);
 
   // Schedule form state
   const [scheduleTitle, setScheduleTitle] = useState('Product Sync & Review');
@@ -59,34 +59,55 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
   }, []);
 
   // 1. Instant Meeting
-  const handleStartInstantMeeting = () => {
-    const newId = generateMeetingId();
-    registerCreatedMeeting(newId);
-    setDropdownOpen(false);
-    router.push(`/meet/${newId}?host=true`);
+  const handleStartInstantMeeting = async () => {
+    if (creatingMeeting) return;
+    setCreatingMeeting(true);
+    try {
+      const { room } = await createAnonymousMeeting();
+      setDropdownOpen(false);
+      router.push(`/meet/${room}`);
+    } catch (error) {
+      console.error(error);
+      setCreatingMeeting(false);
+    }
   };
 
   // 2. Create Meeting for Later
-  const handleCreateForLater = () => {
-    const newId = generateMeetingId();
-    registerCreatedMeeting(newId);
-    setGeneratedMeetingId(newId);
-    setDropdownOpen(false);
-    setLaterModalOpen(true);
-    setCopied(false);
+  const handleCreateForLater = async () => {
+    if (creatingMeeting) return;
+    setCreatingMeeting(true);
+    try {
+      const { room } = await createAnonymousMeeting();
+      setGeneratedMeetingId(room);
+      setDropdownOpen(false);
+      setLaterModalOpen(true);
+      setCopied(false);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setCreatingMeeting(false);
+    }
   };
 
   // 3. Open Schedule Modal
-  const handleOpenSchedule = () => {
-    const newId = generateMeetingId();
-    registerCreatedMeeting(newId);
-    setGeneratedMeetingId(newId);
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    setScheduleDate(tomorrow.toISOString().split('T')[0]);
-    setScheduledResult(null);
-    setDropdownOpen(false);
-    setScheduleModalOpen(true);
+  const handleOpenSchedule = async () => {
+    if (creatingMeeting) return;
+    setCreatingMeeting(true);
+    try {
+      const { room } = await createAnonymousMeeting();
+      setGeneratedMeetingId(room);
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const localDate = new Date(tomorrow.getTime() - tomorrow.getTimezoneOffset() * 60_000);
+      setScheduleDate(localDate.toISOString().split('T')[0]);
+      setScheduledResult(null);
+      setDropdownOpen(false);
+      setScheduleModalOpen(true);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setCreatingMeeting(false);
+    }
   };
 
   // Submit Schedule
@@ -130,10 +151,11 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
           <button
             type="button"
             onClick={() => setDropdownOpen(!dropdownOpen)}
+            disabled={creatingMeeting}
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-md shadow-blue-500/25 transition-all"
           >
             <Video className="w-5 h-5 fill-white/20" />
-            <span>New meeting</span>
+            <span>{creatingMeeting ? 'Creating…' : 'New meeting'}</span>
           </button>
 
           {/* Dropdown Menu */}
@@ -262,7 +284,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
               </button>
               <button
                 type="button"
-                onClick={() => router.push(`/meet/${generatedMeetingId}?host=true`)}
+                onClick={() => router.push(`/meet/${generatedMeetingId}`)}
                 className="px-5 py-2.5 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-xs shadow-md shadow-blue-500/20 transition-all flex items-center gap-1.5"
               >
                 <span>Join now as host</span>
@@ -391,7 +413,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => router.push(`/meet/${scheduledResult.meetingId}?host=true`)}
+                    onClick={() => router.push(`/meet/${scheduledResult.meetingId}`)}
                     className="px-5 py-2.5 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-xs shadow-md shadow-blue-500/20 transition-all flex items-center gap-1.5"
                   >
                     <span>Start call now</span>

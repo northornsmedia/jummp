@@ -1,10 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl =
-  process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://gyqcrrjxrmlnonsppnlp.supabase.co';
-const supabaseAnonKey =
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd5cWNycmp4cm1sbm9uc3BwbmxwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk0ODUzNTcsImV4cCI6MjEwNTA2MTM1N30.8EE-6YLpE5PBq-aZ6XDdee0XApxizHkLVYMU5paiv4Q';
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseAnonKey) {
+  throw new Error('NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY are required');
+}
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   realtime: {
@@ -94,18 +95,6 @@ export async function checkMeetingStatus(code: string): Promise<MeetingStatusChe
       diffMinutes >= 10;
     const isEnded = meeting.status === 'ended' || isTenMinutesInactive;
     const isActive = meeting.status === 'active' && !isEnded && diffMinutes <= 3;
-
-    if (isTenMinutesInactive && meeting.status !== 'ended') {
-      supabase
-        .from('meetings')
-        .update({
-          status: 'ended',
-          ended_at: new Date().toISOString(),
-          active_participants_count: 0,
-        })
-        .eq('id', meeting.id)
-        .then(() => {});
-    }
 
     let message = 'Room is ready to join';
     if (isExpired) {
