@@ -22,6 +22,7 @@ import {
   UserCheck,
   UserX,
   Volume2,
+  VolumeX,
   Shield,
   ShieldCheck,
   ArrowLeft,
@@ -101,6 +102,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [audioVolume, setAudioVolume] = useState(0); // 0-100 live voice volume
   const [isResyncing, setIsResyncing] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [locallyMutedAudio, setLocallyMutedAudio] = useState<Record<string, boolean>>({});
+  const [locallyMutedVideo, setLocallyMutedVideo] = useState<Record<string, boolean>>({});
 
   // 10-Minute Inactivity Watchdog ("Are you still here?")
   const [showStillHereModal, setShowStillHereModal] = useState(false);
@@ -1187,6 +1190,99 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           delete next[msg.payload.name];
           return next;
         });
+      } else if (msg.type === 'MUTE_PARTICIPANT_AUDIO') {
+        const myName = userName || (isHost ? 'Host' : 'Guest');
+        if (msg.payload?.targetName === myName) {
+          setMicEnabled(false);
+          if (localStreamRef.current) {
+            localStreamRef.current.getAudioTracks().forEach((t) => {
+              t.enabled = false;
+            });
+          }
+          if (livekitRoomRef.current) {
+            livekitRoomRef.current.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+          }
+          showToast('Microphone Muted', `You were muted by ${msg.payload?.byHost || 'the host'}`, 'info');
+          playChime('knock');
+        }
+        if (msg.payload?.targetName) {
+          setParticipants((prev) =>
+            prev.map((p) =>
+              p.name === msg.payload.targetName ? { ...p, audioEnabled: false } : p
+            )
+          );
+        }
+      } else if (msg.type === 'MUTE_ALL_AUDIO') {
+        if (!isHost) {
+          setMicEnabled(false);
+          if (localStreamRef.current) {
+            localStreamRef.current.getAudioTracks().forEach((t) => {
+              t.enabled = false;
+            });
+          }
+          if (livekitRoomRef.current) {
+            livekitRoomRef.current.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+          }
+          showToast('Microphone Muted', 'The host muted all participants', 'info');
+          playChime('knock');
+        }
+        setParticipants((prev) =>
+          prev.map((p) => (!p.isHost ? { ...p, audioEnabled: false } : p))
+        );
+      } else if (msg.type === 'STOP_PARTICIPANT_VIDEO') {
+        const myName = userName || (isHost ? 'Host' : 'Guest');
+        if (msg.payload?.targetName === myName) {
+          setCamEnabled(false);
+          if (localStreamRef.current) {
+            localStreamRef.current.getVideoTracks().forEach((t) => {
+              t.enabled = false;
+            });
+          }
+          if (livekitRoomRef.current) {
+            livekitRoomRef.current.localParticipant.setCameraEnabled(false).catch(() => {});
+          }
+          showToast('Camera Turned Off', `Your video was stopped by ${msg.payload?.byHost || 'the host'}`, 'info');
+          playChime('knock');
+        }
+        if (msg.payload?.targetName) {
+          setParticipants((prev) =>
+            prev.map((p) =>
+              p.name === msg.payload.targetName ? { ...p, videoEnabled: false } : p
+            )
+          );
+        }
+      } else if (msg.type === 'STOP_ALL_VIDEO') {
+        if (!isHost) {
+          setCamEnabled(false);
+          if (localStreamRef.current) {
+            localStreamRef.current.getVideoTracks().forEach((t) => {
+              t.enabled = false;
+            });
+          }
+          if (livekitRoomRef.current) {
+            livekitRoomRef.current.localParticipant.setCameraEnabled(false).catch(() => {});
+          }
+          showToast('Camera Turned Off', 'The host stopped all video cameras', 'info');
+          playChime('knock');
+        }
+        setParticipants((prev) =>
+          prev.map((p) => (!p.isHost ? { ...p, videoEnabled: false } : p))
+        );
+      } else if (msg.type === 'MEDIA_STATE_UPDATE') {
+        const { participantName, audioEnabled, videoEnabled } = msg.payload || {};
+        if (participantName) {
+          setParticipants((prev) =>
+            prev.map((p) =>
+              p.name === participantName
+                ? {
+                    ...p,
+                    ...(typeof audioEnabled === 'boolean' ? { audioEnabled } : {}),
+                    ...(typeof videoEnabled === 'boolean' ? { videoEnabled } : {}),
+                  }
+                : p
+            )
+          );
+        }
       } else if (msg.type === 'PEER_RESYNC') {
         // A peer just returned from another app / lock screen
         if (inCall && msg.payload.name !== userName) {
@@ -1335,6 +1431,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     if (livekitRoomRef.current) {
       livekitRoomRef.current.localParticipant.setCameraEnabled(nextState).catch(() => {});
     }
+    channelRef.current?.send('MEDIA_STATE_UPDATE', {
+      participantName: userName || (isHost ? 'Host' : 'Guest'),
+      audioEnabled: micEnabled,
+      videoEnabled: nextState,
+    });
   };
 
   // Toggle Mic
@@ -1350,6 +1451,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     if (livekitRoomRef.current) {
       livekitRoomRef.current.localParticipant.setMicrophoneEnabled(nextState).catch(() => {});
     }
+    channelRef.current?.send('MEDIA_STATE_UPDATE', {
+      participantName: userName || (isHost ? 'Host' : 'Guest'),
+      audioEnabled: nextState,
+      videoEnabled: camEnabled,
+    });
   };
 
   // Screen Sharing
@@ -1497,6 +1603,86 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     setTimeout(() => {
       setFloatingReactions((prev) => prev.filter((r) => r.id !== id));
     }, 2400);
+  };
+
+  // =========================================================================
+  // PARTICIPANT MODERATION: MUTE AUDIO & STOP VIDEO (Individual + All)
+  // =========================================================================
+  const handleMuteParticipantAudio = (participantName: string) => {
+    triggerHaptic('medium');
+    const myName = userName || (isHost ? 'Host' : 'Guest');
+
+    if (isHost) {
+      // Host sends remote mute command
+      channelRef.current?.send('MUTE_PARTICIPANT_AUDIO', {
+        targetName: participantName,
+        byHost: myName,
+      });
+      setParticipants((prev) =>
+        prev.map((p) => (p.name === participantName ? { ...p, audioEnabled: false } : p))
+      );
+      showToast('Participant Muted', `Muted ${participantName}'s microphone`, 'info');
+    } else {
+      // Non-host toggles local audio mute for this participant
+      const isMuted = Boolean(locallyMutedAudio[participantName]);
+      setLocallyMutedAudio((prev) => ({
+        ...prev,
+        [participantName]: !isMuted,
+      }));
+      showToast(
+        isMuted ? 'Audio Unmuted' : 'Audio Muted',
+        `${participantName}'s sound ${isMuted ? 'unmuted' : 'muted for you'}`,
+        'info'
+      );
+    }
+  };
+
+  const handleMuteAllAudio = () => {
+    triggerHaptic('heavy');
+    const myName = userName || (isHost ? 'Host' : 'Guest');
+    channelRef.current?.send('MUTE_ALL_AUDIO', { byHost: myName });
+    setParticipants((prev) =>
+      prev.map((p) => (!p.isHost ? { ...p, audioEnabled: false } : p))
+    );
+    showToast('Mute All', 'All participant microphones have been muted', 'info');
+  };
+
+  const handleStopParticipantVideo = (participantName: string) => {
+    triggerHaptic('medium');
+    const myName = userName || (isHost ? 'Host' : 'Guest');
+
+    if (isHost) {
+      channelRef.current?.send('STOP_PARTICIPANT_VIDEO', {
+        targetName: participantName,
+        byHost: myName,
+      });
+      setParticipants((prev) =>
+        prev.map((p) => (p.name === participantName ? { ...p, videoEnabled: false } : p))
+      );
+      showToast('Video Stopped', `Stopped ${participantName}'s video`, 'info');
+    } else {
+      // Non-host hides video locally
+      const isHidden = Boolean(locallyMutedVideo[participantName]);
+      setLocallyMutedVideo((prev) => ({
+        ...prev,
+        [participantName]: !isHidden,
+      }));
+      showToast(
+        isHidden ? 'Video Shown' : 'Video Hidden',
+        `${participantName}'s video ${isHidden ? 'shown' : 'hidden for you'}`,
+        'info'
+      );
+    }
+  };
+
+  const handleStopAllVideo = () => {
+    triggerHaptic('heavy');
+    const myName = userName || (isHost ? 'Host' : 'Guest');
+    channelRef.current?.send('STOP_ALL_VIDEO', { byHost: myName });
+    setParticipants((prev) =>
+      prev.map((p) => (!p.isHost ? { ...p, videoEnabled: false } : p))
+    );
+    showToast('Stop All Video', 'All participant video cameras turned off', 'info');
   };
 
   // Join Action - Host joins directly, Guests ALWAYS require host approval
@@ -2415,20 +2601,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 {/* Other Remote Participants */}
                 {otherParticipants.map((participant) => {
                   const remoteStream = remoteStreams[participant.name];
+                  const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
+                  const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+
                   return (
                     <div
                       key={participant.id}
-                      className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center"
+                      className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center group"
                     >
-                      {remoteStream ? (
+                      {remoteStream && !isVideoStopped ? (
                         <video
                           autoPlay
                           playsInline
+                          muted={isAudioMuted}
                           className="w-full h-full object-cover"
                           ref={(el) => {
                             if (el && el.srcObject !== remoteStream) {
                               el.srcObject = remoteStream;
                               el.play().catch(() => {});
+                            }
+                            if (el) {
+                              el.muted = isAudioMuted;
                             }
                           }}
                         />
@@ -2437,14 +2630,47 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white text-base font-bold flex items-center justify-center shadow-lg">
                             {participant.name.slice(0, 2).toUpperCase()}
                           </div>
-                          <span className="text-[10px] text-slate-400">Connected</span>
+                          <span className="text-[10px] text-slate-400">
+                            {isVideoStopped ? 'Camera off' : 'Connected'}
+                          </span>
                         </div>
                       )}
+
+                      {/* Top-Right Quick Action Overlays */}
+                      <div className="absolute top-2 right-2 flex items-center gap-1 z-10 bg-slate-950/80 backdrop-blur-md p-1 rounded-lg border border-white/10 shadow-sm opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                        <button
+                          type="button"
+                          onClick={() => handleMuteParticipantAudio(participant.name)}
+                          className={`p-1 rounded-md transition-all active:scale-95 ${
+                            isAudioMuted
+                              ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                              : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                          }`}
+                          title={isAudioMuted ? 'Unmute sound for you' : isHost ? `Mute ${participant.name}` : `Mute ${participant.name} for you`}
+                        >
+                          {isAudioMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleStopParticipantVideo(participant.name)}
+                          className={`p-1 rounded-md transition-all active:scale-95 ${
+                            isVideoStopped
+                              ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
+                              : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                          }`}
+                          title={isVideoStopped ? 'Show video' : isHost ? `Stop ${participant.name}'s video` : `Hide ${participant.name}'s video for you`}
+                        >
+                          {isVideoStopped ? <VideoOff className="w-3 h-3" /> : <Video className="w-3 h-3" />}
+                        </button>
+                      </div>
+
                       <div className="absolute bottom-2 left-2 flex items-center gap-1.5 bg-slate-950/80 backdrop-blur-md px-2 py-0.5 rounded-lg text-[11px] font-medium border border-white/10">
                         <span>{participant.name}</span>
                         {participant.isHost && (
                           <span className="text-[9px] text-blue-400 font-bold uppercase">Host</span>
                         )}
+                        {isAudioMuted && <MicOff className="w-3 h-3 text-red-400" />}
+                        {isVideoStopped && <VideoOff className="w-3 h-3 text-amber-400" />}
                       </div>
                     </div>
                   );
@@ -2564,20 +2790,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   {/* Remote Participant Tile */}
                   {otherParticipants.map((participant) => {
                     const remoteStream = remoteStreams[participant.name];
+                    const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
+                    const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+
                     return (
                       <div
                         key={participant.id}
-                        className="relative w-full aspect-video max-h-[43vh] sm:max-h-[68vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center"
+                        className="relative w-full aspect-video max-h-[43vh] sm:max-h-[68vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center group"
                       >
-                        {remoteStream ? (
+                        {remoteStream && !isVideoStopped ? (
                           <video
                             autoPlay
                             playsInline
+                            muted={isAudioMuted}
                             className="w-full h-full object-cover"
                             ref={(el) => {
                               if (el && el.srcObject !== remoteStream) {
                                 el.srcObject = remoteStream;
                                 el.play().catch(() => {});
+                              }
+                              if (el) {
+                                el.muted = isAudioMuted;
                               }
                             }}
                           />
@@ -2587,16 +2820,63 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                               {participant.name.slice(0, 2).toUpperCase()}
                             </div>
                             <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                              <span>Connected</span>
+                              {isVideoStopped ? (
+                                <>
+                                  <VideoOff className="w-3.5 h-3.5 text-amber-400" />
+                                  <span className="text-amber-300/80">Camera off</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                  <span>Connected</span>
+                                </>
+                              )}
                             </div>
                           </div>
                         )}
+
+                        {/* Top-Right Quick Action Overlays */}
+                        <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-10 bg-slate-950/80 backdrop-blur-md p-1 rounded-xl border border-white/10 shadow-lg opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={() => handleMuteParticipantAudio(participant.name)}
+                            className={`p-1.5 rounded-lg transition-all active:scale-95 ${
+                              isAudioMuted
+                                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                            }`}
+                            title={isAudioMuted ? 'Unmute sound for you' : isHost ? `Mute ${participant.name}` : `Mute ${participant.name} for you`}
+                          >
+                            {isAudioMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleStopParticipantVideo(participant.name)}
+                            className={`p-1.5 rounded-lg transition-all active:scale-95 ${
+                              isVideoStopped
+                                ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
+                                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                            }`}
+                            title={isVideoStopped ? 'Show video' : isHost ? `Stop ${participant.name}'s video` : `Hide ${participant.name}'s video for you`}
+                          >
+                            {isVideoStopped ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
 
                         <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
                           <span>{participant.name}</span>
                           {participant.isHost && (
                             <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
+                          )}
+                          {isAudioMuted && (
+                            <span className="p-0.5 rounded bg-red-500/20 text-red-400" title="Microphone muted">
+                              <MicOff className="w-3 h-3" />
+                            </span>
+                          )}
+                          {isVideoStopped && (
+                            <span className="p-0.5 rounded bg-amber-500/20 text-amber-400" title="Camera off">
+                              <VideoOff className="w-3 h-3" />
+                            </span>
                           )}
                         </div>
                       </div>
@@ -2649,20 +2929,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   {/* Remote Participant Tiles */}
                   {otherParticipants.map((participant) => {
                     const remoteStream = remoteStreams[participant.name];
+                    const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
+                    const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+
                     return (
                       <div
                         key={participant.id}
-                        className="relative w-full aspect-video max-h-[38vh] sm:max-h-[44vh] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center"
+                        className="relative w-full aspect-video max-h-[38vh] sm:max-h-[44vh] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center group"
                       >
-                        {remoteStream ? (
+                        {remoteStream && !isVideoStopped ? (
                           <video
                             autoPlay
                             playsInline
+                            muted={isAudioMuted}
                             className="w-full h-full object-cover"
                             ref={(el) => {
                               if (el && el.srcObject !== remoteStream) {
                                 el.srcObject = remoteStream;
                                 el.play().catch(() => {});
+                              }
+                              if (el) {
+                                el.muted = isAudioMuted;
                               }
                             }}
                           />
@@ -2672,16 +2959,63 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                               {participant.name.slice(0, 2).toUpperCase()}
                             </div>
                             <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                              <span>Connected</span>
+                              {isVideoStopped ? (
+                                <>
+                                  <VideoOff className="w-3.5 h-3.5 text-amber-400" />
+                                  <span className="text-amber-300/80">Camera off</span>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                  <span>Connected</span>
+                                </>
+                              )}
                             </div>
                           </div>
                         )}
+
+                        {/* Top-Right Quick Action Overlays */}
+                        <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-10 bg-slate-950/80 backdrop-blur-md p-1 rounded-xl border border-white/10 shadow-lg opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                          <button
+                            type="button"
+                            onClick={() => handleMuteParticipantAudio(participant.name)}
+                            className={`p-1.5 rounded-lg transition-all active:scale-95 ${
+                              isAudioMuted
+                                ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                            }`}
+                            title={isAudioMuted ? 'Unmute sound for you' : isHost ? `Mute ${participant.name}` : `Mute ${participant.name} for you`}
+                          >
+                            {isAudioMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleStopParticipantVideo(participant.name)}
+                            className={`p-1.5 rounded-lg transition-all active:scale-95 ${
+                              isVideoStopped
+                                ? 'bg-amber-500/20 text-amber-400 hover:bg-amber-500/30'
+                                : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                            }`}
+                            title={isVideoStopped ? 'Show video' : isHost ? `Stop ${participant.name}'s video` : `Hide ${participant.name}'s video for you`}
+                          >
+                            {isVideoStopped ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
 
                         <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
                           <span>{participant.name}</span>
                           {participant.isHost && (
                             <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
+                          )}
+                          {isAudioMuted && (
+                            <span className="p-0.5 rounded bg-red-500/20 text-red-400" title="Microphone muted">
+                              <MicOff className="w-3 h-3" />
+                            </span>
+                          )}
+                          {isVideoStopped && (
+                            <span className="p-0.5 rounded bg-amber-500/20 text-amber-400" title="Camera off">
+                              <VideoOff className="w-3 h-3" />
+                            </span>
                           )}
                         </div>
                       </div>
@@ -2845,10 +3179,34 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     </div>
                   )}
 
-                  {/* Active Participants List */}
+                  {/* Active Participants List with Moderation Controls */}
                   <div className="space-y-2">
-                    <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">
-                      In Call ({participants.length})
+                    <div className="flex items-center justify-between pb-1">
+                      <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">
+                        In Call ({participants.length})
+                      </div>
+                      {isHost && otherParticipants.length > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={handleMuteAllAudio}
+                            className="px-2 py-1 rounded-lg bg-red-600/20 hover:bg-red-600/30 border border-red-500/30 text-red-300 font-semibold text-[10px] flex items-center gap-1 transition-all active:scale-95 shadow-sm"
+                            title="Mute microphones for all participants"
+                          >
+                            <MicOff className="w-3 h-3 text-red-400" />
+                            <span>Mute all</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleStopAllVideo}
+                            className="px-2 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/30 text-amber-300 font-semibold text-[10px] flex items-center gap-1 transition-all active:scale-95 shadow-sm"
+                            title="Turn off video cameras for all participants"
+                          >
+                            <VideoOff className="w-3 h-3 text-amber-400" />
+                            <span>Stop all video</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Local User Tile in People List */}
@@ -2870,29 +3228,78 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                         ) : (
                           <Mic className="w-3.5 h-3.5 text-emerald-400" />
                         )}
+                        {!camEnabled && (
+                          <VideoOff className="w-3.5 h-3.5 text-amber-400" />
+                        )}
                       </div>
                     </div>
 
                     {/* Remote Participants */}
-                    {otherParticipants.map((p) => (
-                      <div
-                        key={p.id}
-                        className="flex items-center justify-between p-2.5 rounded-2xl hover:bg-slate-800/60 bg-slate-900/30 border border-slate-800/50"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-slate-700 to-slate-600 text-slate-200 font-bold text-xs flex items-center justify-center shrink-0">
-                            {p.name.slice(0, 2).toUpperCase()}
+                    {otherParticipants.map((p) => {
+                      const isAudioMuted = p.audioEnabled === false || Boolean(locallyMutedAudio[p.name]);
+                      const isVideoStopped = p.videoEnabled === false || Boolean(locallyMutedVideo[p.name]);
+                      return (
+                        <div
+                          key={p.id}
+                          className="flex items-center justify-between p-2.5 rounded-2xl hover:bg-slate-800/60 bg-slate-900/30 border border-slate-800/50 transition-colors"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-slate-700 to-slate-600 text-slate-200 font-bold text-xs flex items-center justify-center shrink-0">
+                              {p.name.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="truncate">
+                              <div className="font-semibold text-slate-200 truncate">{p.name}</div>
+                              <div className="text-[10px] text-slate-400 flex items-center gap-1.5">
+                                <span>{p.isHost ? 'Host' : 'Guest'}</span>
+                                {isAudioMuted && <span className="text-red-400 font-medium">• Muted</span>}
+                                {isVideoStopped && <span className="text-amber-400 font-medium">• Video off</span>}
+                              </div>
+                            </div>
                           </div>
-                          <div className="truncate">
-                            <div className="font-semibold text-slate-200 truncate">{p.name}</div>
-                            <div className="text-[10px] text-slate-400">{p.isHost ? 'Host' : 'Guest'}</div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {/* Mute / Unmute Audio Button */}
+                            <button
+                              type="button"
+                              onClick={() => handleMuteParticipantAudio(p.name)}
+                              className={`p-1.5 rounded-xl border transition-all active:scale-95 ${
+                                isAudioMuted
+                                  ? 'bg-red-500/20 border-red-500/30 text-red-400 hover:bg-red-500/30'
+                                  : 'bg-slate-800/70 border-slate-700/60 text-slate-300 hover:text-white hover:bg-slate-700'
+                              }`}
+                              title={
+                                isAudioMuted
+                                  ? 'Unmute sound for you'
+                                  : isHost
+                                  ? `Mute ${p.name}'s microphone`
+                                  : `Mute ${p.name}'s sound for you`
+                              }
+                            >
+                              {isAudioMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                            </button>
+
+                            {/* Stop / Show Video Button */}
+                            <button
+                              type="button"
+                              onClick={() => handleStopParticipantVideo(p.name)}
+                              className={`p-1.5 rounded-xl border transition-all active:scale-95 ${
+                                isVideoStopped
+                                  ? 'bg-amber-500/20 border-amber-500/30 text-amber-400 hover:bg-amber-500/30'
+                                  : 'bg-slate-800/70 border-slate-700/60 text-slate-300 hover:text-white hover:bg-slate-700'
+                              }`}
+                              title={
+                                isVideoStopped
+                                  ? 'Show video'
+                                  : isHost
+                                  ? `Stop ${p.name}'s video camera`
+                                  : `Hide ${p.name}'s video for you`
+                              }
+                            >
+                              {isVideoStopped ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+                            </button>
                           </div>
                         </div>
-                        <div className="flex items-center gap-1.5 shrink-0 text-slate-400">
-                          <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
