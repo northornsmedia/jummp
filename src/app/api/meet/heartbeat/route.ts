@@ -36,13 +36,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Participant identity mismatch' }, { status: 403 });
     }
 
-    const safeAction = action === 'leave' || action === 'keepalive' ? action : 'heartbeat';
+    const safeAction = action === 'leave' || action === 'keepalive' || action === 'end' ? action : 'heartbeat';
     const { data, error } = await supabase.rpc('rpc_heartbeat', {
       p_code: code,
       p_participant_name: participantName || (capability.scope === 'host' ? 'Host' : 'Guest'),
       p_is_host: capability.scope === 'host',
-      p_action: safeAction,
+      p_action: safeAction === 'end' ? 'leave' : safeAction,
     });
+
+    if (body.endMeeting || safeAction === 'end' || (safeAction === 'leave' && (data?.activeParticipantsCount === 0 || data?.active_participants_count === 0))) {
+      await supabase
+        .from('meetings')
+        .update({
+          status: 'ended',
+          ended_at: new Date().toISOString(),
+          last_activity_at: new Date().toISOString(),
+          active_participants_count: 0,
+        })
+        .eq('code', code);
+    }
 
     if (error) {
       console.error('rpc_heartbeat failed:', error.message);
@@ -66,6 +78,19 @@ export async function GET(req: NextRequest) {
     }
     const code = req.nextUrl.searchParams.get('code');
     if (!code) return NextResponse.json({ error: 'Missing code' }, { status: 400 });
+
+    if (req.nextUrl.searchParams.get('activate') === 'true') {
+      const nowIso = new Date().toISOString();
+      await supabase
+        .from('meetings')
+        .update({
+          status: 'active',
+          ended_at: null,
+          last_activity_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('code', code);
+    }
 
     const { data: meeting, error } = await supabase
       .from('meetings')

@@ -71,6 +71,8 @@ import {
 } from '@/lib/meetingSession';
 import {
   createOrGetMeeting,
+  activateMeeting,
+  endMeeting,
   saveChatMessage,
   getMeetingMessages,
   checkMeetingStatus,
@@ -400,32 +402,44 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     async function initStatus() {
       setIsCheckingStatus(true);
-      const check = await checkMeetingStatus(meetingId);
-      if (!isMounted) return;
-      setStatusCheck(check);
-      setIsCheckingStatus(false);
 
-      // Anonymous hosts create the database record. Guests can inspect it but never
-      // create or reactivate a room merely by opening an invitation link.
-      if (isHost && !check.isExpired && !check.isEnded) {
-        const meeting = await createOrGetMeeting(meetingId, 'Host');
-        if (meeting && isMounted) {
-          setDbMeeting(meeting);
-          const messages = await getMeetingMessages(meeting.id);
-          if (messages && messages.length > 0 && isMounted) {
-            setChatMessages(
-              messages.map((m) => ({
-                id: m.id,
-                sender: m.sender_name,
-                text: m.content,
-                time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              }))
-            );
-          }
+      // Auto-activate meeting whenever a user opens the link!
+      // (For free & returning users: once event ended & empty, opening the link activates it immediately)
+      const activeMeeting = await activateMeeting(
+        meetingId,
+        userName || (isHost ? 'Host' : 'Guest')
+      );
+
+      if (activeMeeting && isMounted) {
+        setDbMeeting(activeMeeting);
+        setStatusCheck({
+          exists: true,
+          meeting: activeMeeting,
+          isExpired: false,
+          isActive: true,
+          isEnded: false,
+          daysInactive: 0,
+          message: 'Meeting room is active and ready to join.',
+        });
+
+        const messages = await getMeetingMessages(activeMeeting.id);
+        if (messages && messages.length > 0 && isMounted) {
+          setChatMessages(
+            messages.map((m) => ({
+              id: m.id,
+              sender: m.sender_name,
+              text: m.content,
+              time: new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            }))
+          );
         }
-      } else if (check.meeting && isMounted) {
-        setDbMeeting(check.meeting);
+      } else {
+        const check = await checkMeetingStatus(meetingId);
+        if (!isMounted) return;
+        setStatusCheck(check);
+        if (check.meeting && isMounted) setDbMeeting(check.meeting);
       }
+      setIsCheckingStatus(false);
     }
 
     initStatus();
@@ -3355,6 +3369,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
     markParticipantLeft(meetingId, myName).catch(() => {});
 
+    // For free users: When the event has ended and no one is in call, mark link inactive!
+    const remainingCount = otherParticipants.length;
+    if (remainingCount === 0 || isHost) {
+      endMeeting(meetingId).catch(() => {});
+      if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+        const credential = isHost ? hostToken : admissionToken;
+        if (credential) {
+          navigator.sendBeacon(
+            '/api/meet/heartbeat',
+            JSON.stringify({
+              code: meetingId,
+              participantName: myName,
+              action: 'leave',
+              credential,
+              endMeeting: true,
+            })
+          );
+        }
+      }
+    }
+
     // Stop and kill all local media hardware tracks immediately to release camera/mic
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((t) => {
@@ -3416,6 +3451,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         } catch {}
       }
       markParticipantLeft(meetingId, myName).catch(() => {});
+
+      // If nobody else is left, mark meeting inactive in database
+      if (otherParticipants.length === 0 || isHost) {
+        endMeeting(meetingId).catch(() => {});
+      }
     };
 
     window.addEventListener('beforeunload', handleWindowUnload);
@@ -3424,29 +3464,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       window.removeEventListener('beforeunload', handleWindowUnload);
       window.removeEventListener('pagehide', handleWindowUnload);
     };
-  }, [inCall, userName, isHost, meetingId, participantId]);
+  }, [inCall, userName, isHost, meetingId, participantId, otherParticipants.length]);
 
-  // Reopen Expired or Ended Meeting
+  // Reopen or Activate Meeting
   const handleReopenMeeting = async () => {
-    if (!isHost || !hostToken) {
-      showToast('Host access required', 'Only the anonymous creator can reopen this room.', 'info');
-      return;
-    }
     setIsCheckingStatus(true);
-    const meeting = await createOrGetMeeting(meetingId, 'Host');
+    const meeting = await activateMeeting(meetingId, userName || (isHost ? 'Host' : 'Guest'));
     if (meeting) {
       setDbMeeting(meeting);
       setStatusCheck({
         exists: true,
         meeting,
         isExpired: false,
-        isActive: false,
+        isActive: true,
         isEnded: false,
         daysInactive: 0,
-        message: 'Meeting room reopened and ready.',
+        message: 'Meeting room activated and ready to join.',
       });
       setIsCheckingStatus(false);
       acquireMedia();
+      showToast('Room Activated', 'Meeting link is now active. You can join now.', 'info');
+    } else {
+      setIsCheckingStatus(false);
     }
   };
 
@@ -3569,20 +3608,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               <span>Start a new meeting</span>
             </button>
 
-            {isHost && (
-              <button
-                type="button"
-                onClick={handleReopenMeeting}
-                className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
-              >
-                <RefreshCw className="w-4 h-4" />
-                <span>Reopen this exact room</span>
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={handleReopenMeeting}
+              className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>Activate &amp; Enter Room</span>
+            </button>
 
             <Link
               href="/"
-              className="w-full py-3 px-4 rounded-2xl bg-transparent hover:bg-slate-900 text-slate-400 font-medium text-xs transition-colors flex items-center justify-center gap-2"
+              className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-medium text-xs transition-colors flex items-center justify-center gap-2"
             >
               <Home className="w-4 h-4" />
               <span>Return to home</span>
@@ -3634,12 +3671,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 setInCall(false);
                 setWaitingToJoin(false);
                 setDenied(false);
+                await activateMeeting(meetingId, userName || (isHost ? 'Host' : 'Guest'));
+                setStatusCheck((prev) =>
+                  prev ? { ...prev, isEnded: false, isActive: true, isExpired: false } : null
+                );
                 await acquireMedia();
               }}
               className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
             >
               <RotateCcw className="w-4 h-4" />
-              <span>Rejoin call</span>
+              <span>Rejoin call (Make active)</span>
             </button>
 
             <Link

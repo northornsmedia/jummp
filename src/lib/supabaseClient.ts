@@ -151,6 +151,7 @@ export async function createOrGetMeeting(
         .from('meetings')
         .update({
           status: 'active',
+          ended_at: null,
           last_activity_at: nowIso,
           updated_at: nowIso,
         })
@@ -194,13 +195,14 @@ export async function updateMeetingHeartbeat(meetingId: string): Promise<void> {
       .update({
         last_activity_at: new Date().toISOString(),
         status: 'active',
+        ended_at: null,
       })
       .eq('id', meetingId);
   } catch {}
 }
 
-// 3. Mark meeting as ended when last participant leaves or host terminates
-export async function endMeeting(meetingId: string): Promise<void> {
+// 3. Mark meeting as ended / inactive when last participant leaves or host terminates
+export async function endMeeting(codeOrId: string): Promise<void> {
   try {
     const now = new Date().toISOString();
     await supabase
@@ -209,9 +211,66 @@ export async function endMeeting(meetingId: string): Promise<void> {
         status: 'ended',
         ended_at: now,
         last_activity_at: now,
+        active_participants_count: 0,
       })
-      .eq('id', meetingId);
-  } catch {}
+      .or(`id.eq.${codeOrId},code.eq.${codeOrId}`);
+  } catch (err) {
+    console.warn('Error ending meeting:', err);
+  }
+}
+
+// 3b. Activate meeting when a user opens the link again (for free & returning users)
+export async function activateMeeting(
+  code: string,
+  hostName: string = 'Host'
+): Promise<DBMeeting | null> {
+  try {
+    const nowIso = new Date().toISOString();
+    const { data: existing } = await supabase
+      .from('meetings')
+      .select('*')
+      .eq('code', code)
+      .maybeSingle();
+
+    if (existing) {
+      const { data: updated, error } = await supabase
+        .from('meetings')
+        .update({
+          status: 'active',
+          ended_at: null,
+          last_activity_at: nowIso,
+          updated_at: nowIso,
+        })
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      if (!error && updated) {
+        return updated as DBMeeting;
+      }
+      return existing as DBMeeting;
+    }
+
+    // If meeting does not exist yet, create active room
+    const { data: created, error } = await supabase
+      .from('meetings')
+      .insert({
+        code,
+        title: 'JUMMP Meeting',
+        host_name: hostName,
+        status: 'active',
+        last_activity_at: nowIso,
+      })
+      .select('*')
+      .single();
+
+    if (!error && created) {
+      return created as DBMeeting;
+    }
+    return null;
+  } catch (err) {
+    console.warn('Error activating meeting:', err);
+    return null;
+  }
 }
 
 // 4. Add or update participant (prevents duplicate rows on rejoin)
