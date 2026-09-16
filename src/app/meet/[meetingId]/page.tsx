@@ -94,6 +94,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [micEnabled, setMicEnabled] = useState(true);
   const [camEnabled, setCamEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [showScreenPreview, setShowScreenPreview] = useState(false);
   const [activeScreenSharer, setActiveScreenSharer] = useState<string | null>(null);
   const [screenShareError, setScreenShareError] = useState<string | null>(null);
   const [handRaised, setHandRaised] = useState(false);
@@ -962,6 +963,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       }
       setScreenStream(null);
       setIsScreenSharing(false);
+      setShowScreenPreview(false);
       setActiveScreenSharer(null);
       channelRef.current?.send('SCREEN_SHARE_STOPPED', { sharerName: myName });
       if (livekitRoomRef.current) {
@@ -979,6 +981,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         setScreenStream(stream);
         setIsScreenSharing(true);
+        setShowScreenPreview(false);
         setActiveScreenSharer(myName);
         channelRef.current?.send('SCREEN_SHARE_STARTED', { sharerName: myName });
 
@@ -1760,29 +1763,84 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             /* ========================================================= */
             <div className="flex-1 w-full h-full flex flex-col lg:flex-row gap-3 sm:gap-4 overflow-hidden p-1 sm:p-2">
               {/* Left/Center Stage: Screen Presentation */}
-              <div className="flex-1 h-full min-h-[280px] bg-black rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
-                <video
-                  ref={screenShareVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-contain bg-black"
-                />
-                {/* Overlay Top Bar */}
-                <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
-                  <div className="bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
-                    <MonitorUp className="w-4 h-4 text-blue-400" />
-                    <span>You are presenting to everyone</span>
+              <div className="flex-1 h-full min-h-[280px] bg-slate-950 rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
+                {showScreenPreview ? (
+                  <>
+                    <video
+                      ref={screenShareVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-contain bg-black"
+                    />
+                    {/* Top Overlay Bar */}
+                    <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
+                      <div className="bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
+                        <MonitorUp className="w-4 h-4 text-blue-400" />
+                        <span>You are presenting to everyone</span>
+                      </div>
+                      <div className="flex items-center gap-2 pointer-events-auto">
+                        <button
+                          type="button"
+                          onClick={() => setShowScreenPreview(false)}
+                          className="bg-slate-900/90 hover:bg-slate-800 text-slate-300 text-xs font-semibold px-3 py-1.5 rounded-xl shadow-md border border-white/10 transition-colors"
+                        >
+                          Hide preview (avoid mirror)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={toggleScreenShare}
+                          className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
+                        >
+                          <Square className="w-3 h-3 fill-current" />
+                          <span>Stop presenting</span>
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  /* Google Meet Presenter Card (Prevents recursive mirror loop) */
+                  <div className="flex flex-col items-center justify-center text-center p-6 sm:p-10 space-y-5 animate-in fade-in zoom-in-95 duration-200 max-w-lg">
+                    <div className="w-20 h-20 rounded-3xl bg-blue-600/10 border border-blue-500/25 flex items-center justify-center text-[#0b5cff] shadow-xl shadow-blue-500/10">
+                      <MonitorUp className="w-10 h-10 animate-pulse" />
+                    </div>
+
+                    <div className="space-y-2">
+                      <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-xs font-semibold text-blue-400">
+                        <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+                        <span>Presentation Live</span>
+                      </div>
+                      <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+                        You're presenting to everyone
+                      </h3>
+                      <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
+                        Your screen is being broadcasted live to everyone in this call.
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        To avoid an infinite mirror effect, your screen view is minimized here.
+                      </p>
+                    </div>
+
+                    <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={toggleScreenShare}
+                        className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center justify-center gap-2 transition-all border border-red-500/50"
+                      >
+                        <Square className="w-3.5 h-3.5 fill-current" />
+                        <span>Stop presenting</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setShowScreenPreview(true)}
+                        className="w-full sm:w-auto px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
+                      >
+                        Show video preview
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={toggleScreenShare}
-                    className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 pointer-events-auto transition-all active:scale-95 flex items-center gap-1.5"
-                  >
-                    <Square className="w-3 h-3 fill-current" />
-                    <span>Stop presenting</span>
-                  </button>
-                </div>
+                )}
               </div>
 
               {/* Right Sidebar: Participant Video Feeds */}
