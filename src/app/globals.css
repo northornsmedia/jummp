@@ -130,3 +130,48 @@ body {
   padding-top: max(env(safe-area-inset-top, 0px), 0.75rem);
 }
 
+/* =========================================================================
+   MOBILE WEB OPTIMIZATIONS (SMOOTH AF 60-120 FPS ENGINE)
+   ========================================================================= */
+
+html, body {
+  /* Prevent rubberband bounce on mobile browsers */
+  overscroll-behavior-y: none;
+  -webkit-overflow-scrolling: touch;
+  /* Eliminate 300ms double-tap delay */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Force GPU compositing for video tiles */
+video {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  will-change: transform;
+}
+
+/* Smooth iOS Spring Curve for Mobile Bottom Sheets */
+@keyframes sheetSpringUp {
+  0% {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sheet-spring-up {
+  animation: sheetSpringUp 0.35s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+  will-change: transform, opacity;
+}
+
+/* Custom smooth scroll in drawers */
+.touch-scroll-smooth {
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+}
+

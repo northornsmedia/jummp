@@ -58,6 +58,7 @@ import {
   generateMeetingId,
   isMeetingCreator,
   registerCreatedMeeting,
+  triggerHaptic,
 } from '@/lib/meetStore';
 import {
   createOrGetMeeting,
@@ -164,6 +165,29 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       setToastNotification(null);
     }, 3800);
   }, []);
+
+  // Mobile Bottom Sheet Gesture Tracking (Swipe down to dismiss)
+  const sheetTouchStartY = useRef(0);
+  const [sheetOffsetY, setSheetOffsetY] = useState(0);
+
+  const handleSheetTouchStart = (e: React.TouchEvent) => {
+    sheetTouchStartY.current = e.touches[0].clientY;
+  };
+
+  const handleSheetTouchMove = (e: React.TouchEvent) => {
+    const deltaY = e.touches[0].clientY - sheetTouchStartY.current;
+    if (deltaY > 0) {
+      setSheetOffsetY(deltaY);
+    }
+  };
+
+  const handleSheetTouchEnd = () => {
+    if (sheetOffsetY > 65) {
+      triggerHaptic('light');
+      setActivePanel(null);
+    }
+    setSheetOffsetY(0);
+  };
 
   const channelRef = useRef<MeetChannel | null>(null);
 
@@ -580,6 +604,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Flip Camera (Front / Rear) for Mobile devices
   const switchCamera = async () => {
+    triggerHaptic('medium');
     const nextMode = facingMode === 'user' ? 'environment' : 'user';
     setFacingMode(nextMode);
 
@@ -927,6 +952,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Toggle Camera
   const toggleCam = () => {
+    triggerHaptic('light');
     const nextState = !camEnabled;
     setCamEnabled(nextState);
     if (localStreamRef.current) {
@@ -941,6 +967,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Toggle Mic
   const toggleMic = () => {
+    triggerHaptic('light');
     const nextState = !micEnabled;
     setMicEnabled(nextState);
     if (localStreamRef.current) {
@@ -1007,6 +1034,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Reactions
   const triggerReaction = (emoji: string, broadcast = true) => {
+    triggerHaptic('light');
     const id = Date.now() + Math.random();
     setFloatingReactions((prev) => [...prev, { id, emoji }]);
     if (broadcast && channelRef.current) {
@@ -1019,6 +1047,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Join Action
   const handleJoinClick = (directBypass = false) => {
+    triggerHaptic('medium');
     const name = userName.trim() || (isHost ? 'Host' : 'Guest User');
     setUserName(name);
 
@@ -1112,6 +1141,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Leave Call
   const handleLeaveCall = () => {
+    triggerHaptic('heavy');
     playChime('leave');
     if (channelRef.current) {
       channelRef.current.send('USER_LEFT', { name: userName || (isHost ? 'Host' : 'Guest') });
@@ -2084,76 +2114,107 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
         {/* SIDE DRAWER (Desktop) or SLIDE-UP BOTTOM SHEET (Mobile) */}
         {activePanel && (
-          <aside
-            className={`
-              fixed inset-x-0 bottom-0 z-40 sm:relative sm:inset-auto sm:w-88 sm:h-auto 
-              bg-slate-950/95 sm:bg-slate-900/98 backdrop-blur-2xl border-t sm:border-t-0 sm:border-l border-slate-800 
-              flex flex-col rounded-t-3xl sm:rounded-none max-h-[82vh] sm:max-h-full shadow-2xl 
-              animate-in slide-in-from-bottom sm:slide-in-from-right duration-250 pb-safe
-            `}
-          >
-            {/* Mobile Drag Indicator */}
-            <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto my-2.5 sm:hidden" />
+          <>
+            {/* Mobile Backdrop Overlay (Tap to dismiss) */}
+            <div
+              className="fixed inset-0 bg-black/60 backdrop-blur-xs z-40 sm:hidden animate-in fade-in duration-200"
+              onClick={() => {
+                triggerHaptic('light');
+                setActivePanel(null);
+              }}
+            />
 
-            {/* Google Meet Unified Top Tab Bar */}
-            <div className="px-3 pt-3 pb-2 border-b border-slate-800 flex items-center justify-between gap-1">
-              <div className="flex items-center gap-1 bg-slate-950/80 p-1 rounded-xl border border-slate-800 flex-1">
+            <aside
+              style={{
+                transform: sheetOffsetY > 0 ? `translateY(${sheetOffsetY}px)` : undefined,
+                transition: sheetOffsetY === 0 ? 'transform 0.25s cubic-bezier(0.32, 0.72, 0, 1)' : 'none',
+              }}
+              className={`
+                fixed inset-x-0 bottom-0 z-50 sm:relative sm:inset-auto sm:w-88 sm:h-auto 
+                bg-slate-950/98 sm:bg-slate-900/98 backdrop-blur-2xl border-t sm:border-t-0 sm:border-l border-slate-800 
+                flex flex-col rounded-t-3xl sm:rounded-none max-h-[85vh] sm:max-h-full shadow-2xl 
+                sheet-spring-up sm:animate-in sm:slide-in-from-right duration-250 pb-safe touch-scroll-smooth
+              `}
+            >
+              {/* Mobile Drag Indicator (Touch Gesture Dismiss) */}
+              <div
+                className="w-full pt-3 pb-1 cursor-grab active:cursor-grabbing sm:hidden touch-none"
+                onTouchStart={handleSheetTouchStart}
+                onTouchMove={handleSheetTouchMove}
+                onTouchEnd={handleSheetTouchEnd}
+              >
+                <div className="w-12 h-1.5 bg-slate-700 rounded-full mx-auto" />
+              </div>
+
+              {/* Google Meet Unified Top Tab Bar */}
+              <div className="px-3 pt-2 sm:pt-3 pb-2 border-b border-slate-800 flex items-center justify-between gap-1">
+                <div className="flex items-center gap-1 bg-slate-950/80 p-1 rounded-xl border border-slate-800 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('light');
+                      setActivePanel('chat');
+                      setUnreadChat(false);
+                    }}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
+                      activePanel === 'chat'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                    }`}
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    <span>Chat</span>
+                    {unreadChat && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('light');
+                      setActivePanel('people');
+                    }}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
+                      activePanel === 'people'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                    }`}
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span>People</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 font-mono">
+                      {participants.length}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('light');
+                      setActivePanel('info');
+                    }}
+                    className={`p-1.5 rounded-lg text-xs font-semibold transition-all ${
+                      activePanel === 'info'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                    }`}
+                    title="Meeting Details"
+                  >
+                    <Info className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
                 <button
                   type="button"
                   onClick={() => {
-                    setActivePanel('chat');
-                    setUnreadChat(false);
+                    triggerHaptic('light');
+                    setActivePanel(null);
                   }}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
-                    activePanel === 'chat'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
-                  }`}
+                  className="p-2 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors ml-1"
+                  title="Close panel"
                 >
-                  <MessageSquare className="w-3.5 h-3.5" />
-                  <span>Chat</span>
-                  {unreadChat && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActivePanel('people')}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
-                    activePanel === 'people'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
-                  }`}
-                >
-                  <Users className="w-3.5 h-3.5" />
-                  <span>People</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 font-mono">
-                    {participants.length}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActivePanel('info')}
-                  className={`p-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    activePanel === 'info'
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
-                  }`}
-                  title="Meeting Details"
-                >
-                  <Info className="w-3.5 h-3.5" />
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-
-              <button
-                type="button"
-                onClick={() => setActivePanel(null)}
-                className="p-2 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors ml-1"
-                title="Close panel"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
 
             {/* Panel Body */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
@@ -2389,7 +2450,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               )}
             </div>
           </aside>
-        )}
+        </>
+      )}
       </div>
 
       {/* FLOATING EMOJI REACTIONS PICKER (Mobile & Desktop) */}
@@ -2499,6 +2561,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <button
               type="button"
               onClick={() => {
+                triggerHaptic('medium');
                 playChime('hand');
                 setHandRaised(!handRaised);
               }}
@@ -2519,7 +2582,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="relative group">
             <button
               type="button"
-              onClick={() => setShowReactionsPicker(!showReactionsPicker)}
+              onClick={() => {
+                triggerHaptic('light');
+                setShowReactionsPicker(!showReactionsPicker);
+              }}
               className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
                 showReactionsPicker
                   ? 'bg-blue-600 text-white border-blue-500'
@@ -2554,7 +2620,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="relative group">
             <button
               type="button"
-              onClick={() => setActivePanel(activePanel === 'info' ? null : 'info')}
+              onClick={() => {
+                triggerHaptic('light');
+                setActivePanel(activePanel === 'info' ? null : 'info');
+              }}
               className={`p-2.5 rounded-xl transition-colors ${
                 activePanel === 'info'
                   ? 'bg-blue-600 text-white'
@@ -2571,7 +2640,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="relative group">
             <button
               type="button"
-              onClick={() => setActivePanel(activePanel === 'people' ? null : 'people')}
+              onClick={() => {
+                triggerHaptic('light');
+                setActivePanel(activePanel === 'people' ? null : 'people');
+              }}
               className={`p-2.5 rounded-xl transition-colors relative ${
                 activePanel === 'people'
                   ? 'bg-blue-600 text-white'
@@ -2592,6 +2664,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <button
               type="button"
               onClick={() => {
+                triggerHaptic('light');
                 setActivePanel(activePanel === 'chat' ? null : 'chat');
                 setUnreadChat(false);
               }}

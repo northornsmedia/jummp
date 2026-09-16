@@ -207,7 +207,17 @@ export function playChime(type: 'knock' | 'admit' | 'leave' | 'chat' | 'hand' = 
   } catch {}
 }
 
-// Real-time voice activity detector for live speaking indicator
+// Mobile Haptic Feedback for Native Touch Response
+export function triggerHaptic(type: 'light' | 'medium' | 'heavy' = 'light') {
+  if (typeof window === 'undefined' || !('vibrate' in navigator)) return;
+  try {
+    if (type === 'light') navigator.vibrate(10);
+    else if (type === 'medium') navigator.vibrate(20);
+    else if (type === 'heavy') navigator.vibrate([15, 30, 15]);
+  } catch {}
+}
+
+// Real-time voice activity detector for live speaking indicator (Optimized for Mobile 60fps)
 export function createAudioVisualizer(
   stream: MediaStream,
   onVolume: (vol: number) => void
@@ -231,21 +241,33 @@ export function createAudioVisualizer(
     const dataArray = new Uint8Array(analyser.frequencyBinCount);
     let animationId: number;
     let isRunning = true;
+    let lastTime = 0;
+    let lastVolume = 0;
 
     const checkAudio = () => {
       if (!isRunning) return;
       if (ctx.state === 'suspended') {
         ctx.resume().catch(() => {});
       }
-      analyser.getByteFrequencyData(dataArray);
-      let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) {
-        sum += dataArray[i];
+
+      const now = performance.now();
+      // Throttle React state triggers to ~120ms (prevents 120fps component thrashing on mobile)
+      if (now - lastTime > 120) {
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const avg = sum / dataArray.length;
+        const normalized = Math.min(100, Math.round((avg / 128) * 100));
+
+        if (Math.abs(normalized - lastVolume) > 5 || (normalized === 0 && lastVolume !== 0)) {
+          lastVolume = normalized;
+          onVolume(normalized);
+        }
+        lastTime = now;
       }
-      const avg = sum / dataArray.length;
-      // Map to 0-100 range
-      const normalized = Math.min(100, Math.round((avg / 128) * 100));
-      onVolume(normalized);
+
       animationId = requestAnimationFrame(checkAudio);
     };
 
