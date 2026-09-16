@@ -2409,19 +2409,135 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     showToast('Notes Copied', 'Meeting transcripts copied to clipboard', 'info');
   };
 
-  // Download Notes as text file
+  // Download Notes as Word document (.doc)
   const downloadNotes = () => {
     triggerHaptic('medium');
-    const formatted = `JUMMP Meet - Live Meeting Notes & Transcripts\nMeeting: ${meetingId}\nDate: ${new Date().toLocaleDateString()}\n\n` +
-      meetingNotes.map((n) => `[${n.time}] ${n.speaker}:\n"${n.text}"\n`).join('\n');
-    const blob = new Blob([formatted], { type: 'text/plain;charset=utf-8' });
+
+    const escapeXml = (str: string) =>
+      str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+    const dateStr = new Date().toLocaleDateString(undefined, {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+    const timeStr = new Date().toLocaleTimeString();
+
+    const notesHtml = meetingNotes.length === 0
+      ? '<p style="color: #64748b; font-style: italic;">No meeting transcripts recorded yet.</p>'
+      : meetingNotes
+          .map((n) => {
+            const speakerEsc = escapeXml(n.speaker || 'Participant');
+            const timeEsc = escapeXml(n.time || '');
+            const typeEsc = escapeXml(n.isAutoTranscript ? 'Spoken' : 'Manual Note');
+            const textEsc = escapeXml(n.text || '').replace(/\n/g, '<br/>');
+            return `
+              <div style="margin-bottom: 12pt; padding: 8pt 12pt; background-color: #f8fafc; border-left: 3.5pt solid #2563eb; border-radius: 4pt;">
+                <div style="margin-bottom: 3pt;">
+                  <strong style="color: #1e40af; font-size: 11pt;">${speakerEsc}</strong>
+                  <span style="display: inline-block; margin-left: 6pt; font-size: 8pt; background-color: #dbeafe; color: #1d4ed8; padding: 1pt 5pt; border-radius: 3pt; font-weight: bold; text-transform: uppercase;">${typeEsc}</span>
+                  <span style="color: #64748b; font-size: 9pt; margin-left: 8pt;">${timeEsc}</span>
+                </div>
+                <div style="color: #334155; font-size: 10.5pt; line-height: 1.5; margin-top: 4pt;">${textEsc}</div>
+              </div>`;
+          })
+          .join('');
+
+    const docContent = `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+  <meta charset="utf-8">
+  <title>JUMMP Meeting Notes - ${escapeXml(meetingId)}</title>
+  <!--[if gte mso 9]>
+  <xml>
+    <w:WordDocument>
+      <w:View>Print</w:View>
+      <w:Zoom>100</w:Zoom>
+      <w:DoNotOptimizeForBrowser/>
+    </w:WordDocument>
+  </xml>
+  <![endif]-->
+  <style>
+    body {
+      font-family: 'Calibri', 'Arial', sans-serif;
+      font-size: 11pt;
+      color: #0f172a;
+      line-height: 1.5;
+      padding: 24pt;
+    }
+    h1 {
+      color: #1e40af;
+      font-size: 20pt;
+      margin-bottom: 4pt;
+      padding-bottom: 4pt;
+      border-bottom: 2pt solid #2563eb;
+    }
+    .meta-box {
+      margin-bottom: 18pt;
+      padding: 8pt 12pt;
+      background-color: #f1f5f9;
+      border-radius: 4pt;
+      font-size: 9.5pt;
+      color: #475569;
+    }
+    .meta-line {
+      margin-bottom: 2pt;
+    }
+    .meta-label {
+      font-weight: bold;
+      color: #1e293b;
+    }
+    .section-title {
+      font-size: 13pt;
+      font-weight: bold;
+      color: #0f172a;
+      margin-top: 16pt;
+      margin-bottom: 10pt;
+      padding-bottom: 4pt;
+      border-bottom: 1pt solid #cbd5e1;
+    }
+    .footer {
+      margin-top: 28pt;
+      padding-top: 8pt;
+      border-top: 1pt solid #e2e8f0;
+      font-size: 8.5pt;
+      color: #94a3b8;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>JUMMP &bull; Live Meeting Notes &amp; Transcripts</h1>
+  <div class="meta-box">
+    <div class="meta-line"><span class="meta-label">Meeting Room:</span> ${escapeXml(meetingId)}</div>
+    <div class="meta-line"><span class="meta-label">Date &amp; Time:</span> ${dateStr} at ${timeStr}</div>
+    <div class="meta-line"><span class="meta-label">Total Notes:</span> ${meetingNotes.length} entry/entries</div>
+  </div>
+
+  <div class="section-title">Meeting Transcripts &amp; Records</div>
+  ${notesHtml}
+
+  <div class="footer">
+    Exported automatically from JUMMP Meet &bull; AI Live Speech Recognition
+  </div>
+</body>
+</html>`;
+
+    // \ufeff BOM ensures UTF-8 character encoding is recognized by Microsoft Word
+    const blob = new Blob(['\ufeff', docContent], { type: 'application/msword;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `jummp-notes-${meetingId}.txt`;
+    a.download = `jummp-notes-${meetingId}.doc`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Notes Downloaded', 'Saved meeting notes file', 'info');
+    showToast('Document Downloaded', 'Saved meeting notes as Word document (.doc)', 'info');
   };
 
   // Toggle Camera
@@ -5035,7 +5151,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                         type="button"
                         onClick={downloadNotes}
                         className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-                        title="Download notes as text file"
+                        title="Download notes as Word document (.doc)"
                       >
                         <Download className="w-3.5 h-3.5" />
                       </button>
