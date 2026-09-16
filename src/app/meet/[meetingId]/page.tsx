@@ -114,6 +114,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [isRecording, setIsRecording] = useState(false);
   const [isPausedRecording, setIsPausedRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [isRoomRecording, setIsRoomRecording] = useState(false);
+  const [recordingBy, setRecordingBy] = useState<string>('Host');
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [recordedUrl, setRecordedUrl] = useState<string | null>(null);
   const [showRecordingModal, setShowRecordingModal] = useState(false);
@@ -375,6 +377,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // BROWSER-SIDE MEDIA RECORDER (Apple-Grade Client Video & Audio Recording)
   // =========================================================================
   const startBrowserRecording = async () => {
+    if (!isHost) {
+      showToast('Permission Denied', 'Only the meeting host can record this session', 'info');
+      return;
+    }
+
     try {
       // Capture display / tab with audio
       const displayStream = await navigator.mediaDevices.getDisplayMedia({
@@ -452,6 +459,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           recordingStreamRef.current.getTracks().forEach((t) => t.stop());
           recordingStreamRef.current = null;
         }
+
+        // Notify everyone that recording stopped
+        channelRef.current?.send('RECORDING_STATUS', {
+          isRecording: false,
+          recorderName: userName || 'Host',
+        });
       };
 
       // Native browser pill stop trigger
@@ -466,6 +479,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       setIsRecording(true);
       setIsPausedRecording(false);
       setRecordingSeconds(0);
+
+      // Notify everyone in the meeting that host started recording
+      channelRef.current?.send('RECORDING_STATUS', {
+        isRecording: true,
+        recorderName: userName || 'Host',
+      });
+      showToast('Recording Started', 'You are recording this session. All participants are notified.', 'info');
 
       if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = setInterval(() => {
@@ -572,14 +592,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
         // Attach to lobby preview video if present
         if (localVideoRef.current) {
+          localVideoRef.current.defaultMuted = true;
+          localVideoRef.current.muted = true;
           localVideoRef.current.srcObject = stream;
           localVideoRef.current.play().catch(() => {});
         }
         // Attach to in-call video if present
         if (inCallVideoRef.current) {
+          inCallVideoRef.current.defaultMuted = true;
+          inCallVideoRef.current.muted = true;
           inCallVideoRef.current.srcObject = stream;
           inCallVideoRef.current.play().catch(() => {});
         }
+        // Attach to any mounted self-video elements immediately
+        document.querySelectorAll('video[data-self-video="true"]').forEach((vid) => {
+          const v = vid as HTMLVideoElement;
+          v.defaultMuted = true;
+          v.muted = true;
+          if (v.srcObject !== stream) {
+            v.srcObject = stream;
+          }
+          v.play().catch(() => {});
+        });
 
         // Re-publish to LiveKit if connected
         if (livekitRoomRef.current) {
@@ -598,6 +632,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     [camEnabled, micEnabled]
   );
 
+  // Reliable callback ref for mounting local video feeds with 0ms autoplay
+  const bindLocalVideo = useCallback(
+    (el: HTMLVideoElement | null) => {
+      if (!el) return;
+      inCallVideoRef.current = el;
+      el.defaultMuted = true;
+      el.muted = true;
+      const stream = localStreamRef.current || localStream;
+      if (stream) {
+        if (el.srcObject !== stream) {
+          el.srcObject = stream;
+        }
+        el.play().catch(() => {});
+      }
+    },
+    [localStream]
+  );
+
   // Initialize camera & mic in Lobby
   useEffect(() => {
     if (!inCall && !hasLeft && !statusCheck?.isExpired) {
@@ -605,11 +657,67 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
   }, [acquireMedia, inCall, hasLeft, statusCheck?.isExpired]);
 
-  // Clean up media streams only when component unmounts
+  // Synchronize local video stream to self-view elements immediately on mount or view changes
+  useEffect(() => {
+    if (inCall && camEnabled) {
+      const stream = localStreamRef.current || localStream;
+      if (stream) {
+        const attach = () => {
+          document.querySelectorAll('video[data-self-video="true"]').forEach((vid) => {
+            const v = vid as HTMLVideoElement;
+            v.defaultMuted = true;
+            v.muted = true;
+            if (v.srcObject !== stream) {
+              v.srcObject = stream;
+            }
+            v.play().catch(() => {});
+          });
+        };
+        attach();
+        const t1 = setTimeout(attach, 50);
+        const t2 = setTimeout(attach, 200);
+        return () => {
+          clearTimeout(t1);
+          clearTimeout(t2);
+        };
+      } else {
+        acquireMedia();
+      }
+    }
+  }, [inCall, camEnabled, localStream, participants.length, acquireMedia]);
+
+  // Clean up media streams and release hardware when user leaves meeting or unmounts
+  useEffect(() => {
+    if (hasLeft) {
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
+        localStreamRef.current = null;
+      }
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        setLocalStream(null);
+      }
+      if (screenStream) {
+        screenStream.getTracks().forEach((t) => t.stop());
+        setScreenStream(null);
+      }
+      if (recordingStreamRef.current) {
+        recordingStreamRef.current.getTracks().forEach((t) => t.stop());
+        recordingStreamRef.current = null;
+      }
+    }
+  }, [hasLeft, localStream, screenStream]);
+
   useEffect(() => {
     return () => {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+      if (screenStream) {
+        screenStream.getTracks().forEach((t) => t.stop());
+      }
+      if (recordingStreamRef.current) {
+        recordingStreamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
   }, []);
@@ -1191,6 +1299,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             });
           }
 
+          // If we are currently recording, sync RECORDING_STATUS to new user
+          if (isRecording) {
+            channelRef.current?.send('RECORDING_STATUS', {
+              isRecording: true,
+              recorderName: myName,
+            });
+          }
+
           try {
             const pc = createPeerConnection(joinedP.name);
             // Ensure camera/mic tracks are attached
@@ -1358,6 +1474,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           if (isRaised && name !== myName) {
             playChime('knock');
             showToast('Hand Raised', `${name} raised their hand`, 'user');
+          }
+        }
+      } else if (msg.type === 'RECORDING_STATUS') {
+        const { isRecording: recActive, recorderName } = msg.payload || {};
+        setIsRoomRecording(Boolean(recActive));
+        setRecordingBy(recorderName || 'Host');
+        const myName = userName || (isHost ? 'Host' : 'Guest');
+        if (recorderName !== myName) {
+          if (recActive) {
+            playChime('knock');
+            showToast('Recording Started', `${recorderName || 'Host'} started recording this session`, 'info');
+          } else {
+            showToast('Recording Stopped', `${recorderName || 'Host'} stopped recording`, 'info');
           }
         }
       } else if (msg.type === 'PEER_RESYNC') {
@@ -1568,6 +1697,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         localVideoRef.current.srcObject = localStreamRef.current;
         localVideoRef.current.play().catch(() => {});
       }
+      document.querySelectorAll('video[data-self-video="true"]').forEach((vid) => {
+        const v = vid as HTMLVideoElement;
+        v.defaultMuted = true;
+        v.muted = true;
+        const stream = localStreamRef.current || localStream;
+        if (stream && v.srcObject !== stream) {
+          v.srcObject = stream;
+        }
+        v.play().catch(() => {});
+      });
     } else {
       // Muting video: disable all video tracks
       if (localStreamRef.current) {
@@ -2019,12 +2158,46 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     if (channelRef.current) {
       channelRef.current.send('USER_LEFT', { name: userName || (isHost ? 'Host' : 'Guest') });
     }
+
+    // Stop and kill all local media hardware tracks immediately to release camera/mic
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((t) => {
+        t.stop();
+      });
+      localStreamRef.current = null;
+    }
     if (localStream) {
-      localStream.getTracks().forEach((t) => t.stop());
+      localStream.getTracks().forEach((t) => {
+        t.stop();
+      });
+      setLocalStream(null);
     }
     if (screenStream) {
-      screenStream.getTracks().forEach((t) => t.stop());
+      screenStream.getTracks().forEach((t) => {
+        t.stop();
+      });
+      setScreenStream(null);
     }
+    if (recordingStreamRef.current) {
+      recordingStreamRef.current.getTracks().forEach((t) => {
+        t.stop();
+      });
+      recordingStreamRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+    }
+
+    // Close all WebRTC peer connections
+    Object.values(peerConnectionsRef.current).forEach((pc) => {
+      try {
+        pc.close();
+      } catch {}
+    });
+    peerConnectionsRef.current = {};
+
     if (livekitRoomRef.current) {
       livekitRoomRef.current.disconnect();
       livekitRoomRef.current = null;
@@ -2226,12 +2399,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="w-full space-y-2.5 pt-2">
             <button
               type="button"
-              onClick={() => {
+              onClick={async () => {
                 setHasLeft(false);
                 setInCall(false);
                 setWaitingToJoin(false);
                 setDenied(false);
-                acquireMedia();
+                await acquireMedia();
               }}
               className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
             >
@@ -2292,7 +2465,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <div className="relative aspect-[4/3] sm:aspect-video rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-2xl flex items-center justify-center group">
               {camEnabled ? (
                 <video
-                  ref={localVideoRef}
+                  data-self-video="true"
+                  ref={(el) => {
+                    localVideoRef.current = el;
+                    if (el) {
+                      el.defaultMuted = true;
+                      el.muted = true;
+                      const stream = localStreamRef.current || localStream;
+                      if (stream && el.srcObject !== stream) {
+                        el.srcObject = stream;
+                      }
+                      el.play().catch(() => {});
+                    }
+                  }}
                   autoPlay
                   playsInline
                   muted
@@ -2512,40 +2697,48 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </span>
           )}
 
-          {/* Apple-style Active Recording Indicator */}
-          {isRecording && (
-            <div className="flex items-center gap-1.5 sm:gap-2 bg-red-950/80 border border-red-500/40 text-red-300 px-2.5 py-1 rounded-xl shadow-md text-xs">
+          {/* Active Recording Indicator: Host sees controls, Guests see notification badge */}
+          {(isRecording || isRoomRecording) && (
+            <div className="flex items-center gap-1.5 sm:gap-2 bg-red-950/80 border border-red-500/40 text-red-300 px-2.5 py-1 rounded-xl shadow-md text-xs animate-in fade-in">
               <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="font-mono font-bold tracking-wider text-[11px] sm:text-xs">
-                {isPausedRecording ? 'PAUSED' : formatTimer(recordingSeconds)}
-              </span>
-              {isPausedRecording ? (
-                <button
-                  type="button"
-                  onClick={resumeBrowserRecording}
-                  className="p-1 rounded-md bg-red-900/60 hover:bg-red-800 text-white transition-colors"
-                  title="Resume recording"
-                >
-                  <Play className="w-2.5 h-2.5 fill-white" />
-                </button>
+              {isHost && isRecording ? (
+                <>
+                  <span className="font-mono font-bold tracking-wider text-[11px] sm:text-xs">
+                    REC {isPausedRecording ? '(PAUSED)' : formatTimer(recordingSeconds)}
+                  </span>
+                  {isPausedRecording ? (
+                    <button
+                      type="button"
+                      onClick={resumeBrowserRecording}
+                      className="p-1 rounded-md bg-red-900/60 hover:bg-red-800 text-white transition-colors"
+                      title="Resume recording"
+                    >
+                      <Play className="w-2.5 h-2.5 fill-white" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={pauseBrowserRecording}
+                      className="p-1 rounded-md bg-red-900/60 hover:bg-red-800 text-white transition-colors"
+                      title="Pause recording"
+                    >
+                      <Pause className="w-2.5 h-2.5" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={stopBrowserRecording}
+                    className="p-1 rounded-md bg-red-600 hover:bg-red-500 text-white transition-colors"
+                    title="Stop and save recording"
+                  >
+                    <Square className="w-2.5 h-2.5 fill-white" />
+                  </button>
+                </>
               ) : (
-                <button
-                  type="button"
-                  onClick={pauseBrowserRecording}
-                  className="p-1 rounded-md bg-red-900/60 hover:bg-red-800 text-white transition-colors"
-                  title="Pause recording"
-                >
-                  <Pause className="w-2.5 h-2.5" />
-                </button>
+                <span className="font-bold tracking-wider text-[11px] sm:text-xs">
+                  REC • {recordingBy} is recording
+                </span>
               )}
-              <button
-                type="button"
-                onClick={stopBrowserRecording}
-                className="p-1 rounded-md bg-red-600 hover:bg-red-500 text-white transition-colors"
-                title="Stop and save recording"
-              >
-                <Square className="w-2.5 h-2.5 fill-white" />
-              </button>
             </div>
           )}
         </div>
@@ -2814,13 +3007,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center">
                   {camEnabled ? (
                     <video
-                      ref={(el) => {
-                        inCallVideoRef.current = el;
-                        if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
-                          el.srcObject = localStreamRef.current;
-                          el.play().catch(() => {});
-                        }
-                      }}
+                      data-self-video="true"
+                      ref={bindLocalVideo}
                       autoPlay
                       playsInline
                       muted
@@ -2961,13 +3149,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   >
                     {camEnabled ? (
                       <video
-                        ref={(el) => {
-                          inCallVideoRef.current = el;
-                          if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
-                            el.srcObject = localStreamRef.current;
-                            el.play().catch(() => {});
-                          }
-                        }}
+                        data-self-video="true"
+                        ref={bindLocalVideo}
                         autoPlay
                         playsInline
                         muted
@@ -3030,13 +3213,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   >
                     {camEnabled ? (
                       <video
-                        ref={(el) => {
-                          inCallVideoRef.current = el;
-                          if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
-                            el.srcObject = localStreamRef.current;
-                            el.play().catch(() => {});
-                          }
-                        }}
+                        data-self-video="true"
+                        ref={bindLocalVideo}
                         autoPlay
                         playsInline
                         muted
@@ -3183,13 +3361,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   >
                     {camEnabled ? (
                       <video
-                        ref={(el) => {
-                          inCallVideoRef.current = el;
-                          if (el && localStreamRef.current && el.srcObject !== localStreamRef.current) {
-                            el.srcObject = localStreamRef.current;
-                            el.play().catch(() => {});
-                          }
-                        }}
+                        data-self-video="true"
+                        ref={bindLocalVideo}
                         autoPlay
                         playsInline
                         muted
@@ -3856,23 +4029,25 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </span>
           </div>
 
-          {/* Browser Record Button */}
-          <div className="relative group">
-            <button
-              type="button"
-              onClick={isRecording ? stopBrowserRecording : startBrowserRecording}
-              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
-                isRecording
-                  ? 'bg-red-600 text-white border-red-500 animate-pulse shadow-lg shadow-red-600/30'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border-white/10'
-              }`}
-            >
-              <Disc className="w-5 h-5" />
-            </button>
-            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
-              {isRecording ? 'Stop recording' : 'Record meeting'}
-            </span>
-          </div>
+          {/* Browser Record Button (Host Only) */}
+          {isHost && (
+            <div className="relative group">
+              <button
+                type="button"
+                onClick={isRecording ? stopBrowserRecording : startBrowserRecording}
+                className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                  isRecording
+                    ? 'bg-red-600 text-white border-red-500 animate-pulse shadow-lg shadow-red-600/30'
+                    : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border-white/10'
+                }`}
+              >
+                <Disc className="w-5 h-5" />
+              </button>
+              <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+                {isRecording ? 'Stop recording' : 'Record meeting'}
+              </span>
+            </div>
+          )}
 
           {/* Hand Raise */}
           <div className="relative group">
