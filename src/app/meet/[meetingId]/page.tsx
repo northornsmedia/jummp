@@ -129,8 +129,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
 
-  // Remote WebRTC Streams
+  // Remote WebRTC Streams & Screen Sharing
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
+  const remoteScreenTrackIdRef = useRef<string | null>(null);
+  const remoteScreenStreamIdRef = useRef<string | null>(null);
+  const screenSendersRef = useRef<Record<string, RTCRtpSender>>({});
+  const pendingCandidatesRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const peerConnectionsRef = useRef<Record<string, RTCPeerConnection>>({});
 
   // LiveKit SFU Ref
@@ -913,17 +918,59 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
-        pc.addTrack(track, localStreamRef.current!);
+        const hasSender = pc.getSenders().find((s) => s.track?.kind === track.kind);
+        if (!hasSender) {
+          pc.addTrack(track, localStreamRef.current!);
+        }
       });
     }
 
+    // Attach active screen share track if currently presenting
+    if (screenStream && isScreenSharing) {
+      const screenTrack = screenStream.getVideoTracks()[0];
+      if (screenTrack) {
+        const sender = pc.addTrack(screenTrack, screenStream);
+        screenSendersRef.current[targetName] = sender;
+      }
+    }
+
     pc.ontrack = (event) => {
-      if (event.streams && event.streams[0]) {
+      const incomingStream = event.streams[0] || new MediaStream([event.track]);
+      console.log(`[WebRTC] Received ${event.track.kind} track from ${targetName}`);
+
+      const isScreen =
+        Boolean(remoteScreenTrackIdRef.current && event.track.id === remoteScreenTrackIdRef.current) ||
+        Boolean(remoteScreenStreamIdRef.current && incomingStream.id === remoteScreenStreamIdRef.current) ||
+        Boolean(activeScreenSharer === targetName && remoteStreams[targetName] && remoteStreams[targetName].id !== incomingStream.id);
+
+      if (isScreen) {
+        console.log('[WebRTC] Identified as screen share stream from', targetName);
+        setRemoteScreenStream(incomingStream);
+        setActiveScreenSharer(targetName);
+      } else {
         setRemoteStreams((prev) => ({
           ...prev,
-          [targetName]: event.streams[0],
+          [targetName]: incomingStream,
         }));
       }
+
+      // Auto-ensure targetName is in participants list so video tile renders immediately!
+      setParticipants((prev) => {
+        if (prev.some((p) => p.name === targetName)) return prev;
+        return [
+          ...prev,
+          {
+            id: 'peer-' + targetName,
+            name: targetName,
+            isHost: targetName === 'Host',
+            audioEnabled: true,
+            videoEnabled: true,
+            handRaised: false,
+            isScreenSharing: false,
+            joinedAt: Date.now(),
+          },
+        ];
+      });
     };
 
     pc.onicecandidate = (event) => {
@@ -998,7 +1045,32 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             isScreenSharing: false,
             joinedAt: Date.now(),
           };
-          setParticipants((prev) => [...prev.filter((p) => p.name !== myParticipant.name), myParticipant]);
+
+          // Populate participants roster immediately from host's existing list
+          const initialList: Participant[] = [];
+          if (Array.isArray(msg.payload.existingParticipants)) {
+            msg.payload.existingParticipants.forEach((p: Participant) => {
+              if (p.name !== myParticipant.name) {
+                initialList.push(p);
+              }
+            });
+          }
+          if (msg.payload.hostName && !initialList.some((p) => p.name === msg.payload.hostName)) {
+            initialList.push({
+              id: 'host-user',
+              name: msg.payload.hostName,
+              isHost: true,
+              audioEnabled: true,
+              videoEnabled: true,
+              handRaised: false,
+              isScreenSharing: false,
+              joinedAt: Date.now(),
+            });
+          }
+          initialList.push(myParticipant);
+          setParticipants(initialList);
+
+          // Broadcast USER_JOINED so existing participants connect WebRTC to us
           channelRef.current?.send('USER_JOINED', myParticipant);
         }
       } else if (msg.type === 'DENY_GUEST') {
@@ -1018,7 +1090,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'SCREEN_SHARE_STARTED') {
         const sharer = msg.payload?.sharerName;
         setActiveScreenSharer(sharer);
-        // Enforce one screen share at a time: if we are presenting and another starts, stop ours
+        remoteScreenTrackIdRef.current = msg.payload?.trackId || null;
+        remoteScreenStreamIdRef.current = msg.payload?.streamId || null;
+
+        // If another person starts presenting while we are presenting, stop ours
         if (isScreenSharing && sharer !== (userName || (isHost ? 'Host' : 'Guest'))) {
           if (screenStream) {
             screenStream.getTracks().forEach((t) => t.stop());
@@ -1028,28 +1103,89 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         }
       } else if (msg.type === 'SCREEN_SHARE_STOPPED') {
         setActiveScreenSharer(null);
+        setRemoteScreenStream(null);
+        remoteScreenTrackIdRef.current = null;
+        remoteScreenStreamIdRef.current = null;
       } else if (msg.type === 'USER_JOINED') {
         playChime('admit');
+        const joinedP = msg.payload;
         setParticipants((prev) => [
-          ...prev.filter((p) => p.name !== msg.payload.name),
-          msg.payload,
+          ...prev.filter((p) => p.name !== joinedP.name),
+          joinedP,
         ]);
-        showToast('Participant Joined', `${msg.payload.name} entered the call`, 'user');
+        showToast('Participant Joined', `${joinedP.name} entered the call`, 'user');
 
-        if (inCall && msg.payload.name !== userName) {
+        const myName = userName || (isHost ? 'Host' : 'Guest');
+        if (inCall && joinedP.name !== myName) {
+          // Send room roster so the newcomer definitely has all users
+          channelRef.current?.send('ROOM_ROSTER', {
+            to: joinedP.name,
+            participants: [
+              ...participants.filter((p) => p.name !== joinedP.name),
+              {
+                id: 'self-' + myName,
+                name: myName,
+                isHost,
+                audioEnabled: micEnabled,
+                videoEnabled: camEnabled,
+                handRaised,
+                isScreenSharing,
+                joinedAt: Date.now(),
+              },
+            ],
+          });
+
+          // If we are currently sharing screen, send SCREEN_SHARE_STARTED to new user
+          if (isScreenSharing && screenStream) {
+            const screenTrack = screenStream.getVideoTracks()[0];
+            channelRef.current?.send('SCREEN_SHARE_STARTED', {
+              sharerName: myName,
+              streamId: screenStream.id,
+              trackId: screenTrack?.id,
+            });
+          }
+
           try {
-            const pc = createPeerConnection(msg.payload.name);
+            const pc = createPeerConnection(joinedP.name);
+            // Ensure camera/mic tracks are attached
+            if (localStreamRef.current) {
+              localStreamRef.current.getTracks().forEach((track) => {
+                const hasSender = pc.getSenders().find((s) => s.track?.kind === track.kind);
+                if (!hasSender) {
+                  pc.addTrack(track, localStreamRef.current!);
+                }
+              });
+            }
+            // Ensure screen track is attached if screen sharing
+            if (screenStream && isScreenSharing) {
+              const screenTrack = screenStream.getVideoTracks()[0];
+              if (screenTrack) {
+                const sender = pc.addTrack(screenTrack, screenStream);
+                screenSendersRef.current[joinedP.name] = sender;
+              }
+            }
+
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
             channelRef.current?.send('WEBRTC_SIGNAL', {
-              from: userName || (isHost ? 'Host' : 'Guest'),
-              to: msg.payload.name,
+              from: myName,
+              to: joinedP.name,
               type: 'offer',
               sdp: offer,
             });
           } catch (e) {
             console.log('WebRTC offer error:', e);
           }
+        }
+      } else if (msg.type === 'ROOM_ROSTER') {
+        const myName = userName || (isHost ? 'Host' : 'Guest');
+        if (msg.payload.to === myName && Array.isArray(msg.payload.participants)) {
+          setParticipants((prev) => {
+            const map = new Map<string, Participant>();
+            prev.forEach((p) => map.set(p.name, p));
+            msg.payload.participants.forEach((p: Participant) => map.set(p.name, p));
+            return Array.from(map.values());
+          });
         }
       } else if (msg.type === 'USER_LEFT') {
         playChime('leave');
@@ -1059,6 +1195,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           peerConnectionsRef.current[msg.payload.name].close();
           delete peerConnectionsRef.current[msg.payload.name];
         }
+        delete screenSendersRef.current[msg.payload.name];
+        delete pendingCandidatesRef.current[msg.payload.name];
         setRemoteStreams((prev) => {
           const next = { ...prev };
           delete next[msg.payload.name];
@@ -1084,6 +1222,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         const myName = userName || (isHost ? 'Host' : 'Guest');
         if (to !== myName) return;
 
+        // Auto-ensure 'from' is in participants list
+        setParticipants((prev) => {
+          if (prev.some((p) => p.name === from)) return prev;
+          return [
+            ...prev,
+            {
+              id: 'peer-' + from,
+              name: from,
+              isHost: from === 'Host',
+              audioEnabled: true,
+              videoEnabled: true,
+              handRaised: false,
+              isScreenSharing: false,
+              joinedAt: Date.now(),
+            },
+          ];
+        });
+
         let pc = peerConnectionsRef.current[from] || createPeerConnection(from);
 
         try {
@@ -1097,6 +1253,26 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               }
             }
             await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+
+            // Drain queued ICE candidates
+            const pending = pendingCandidatesRef.current[from] || [];
+            for (const cand of pending) {
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate(cand));
+              } catch {}
+            }
+            pendingCandidatesRef.current[from] = [];
+
+            // Ensure local tracks are attached before answering
+            if (localStreamRef.current) {
+              localStreamRef.current.getTracks().forEach((track) => {
+                const hasSender = pc.getSenders().find((s) => s.track?.kind === track.kind);
+                if (!hasSender) {
+                  pc.addTrack(track, localStreamRef.current!);
+                }
+              });
+            }
+
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             channelRef.current?.send('WEBRTC_SIGNAL', {
@@ -1108,14 +1284,29 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           } else if (type === 'answer') {
             if (pc.signalingState === 'have-local-offer') {
               await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+
+              // Drain queued ICE candidates
+              const pending = pendingCandidatesRef.current[from] || [];
+              for (const cand of pending) {
+                try {
+                  await pc.addIceCandidate(new RTCIceCandidate(cand));
+                } catch {}
+              }
+              pendingCandidatesRef.current[from] = [];
             }
           } else if (type === 'candidate' && candidate) {
-            try {
-              if (pc.remoteDescription) {
+            if (pc.remoteDescription && pc.remoteDescription.type) {
+              try {
                 await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (candErr) {
+                console.warn('ICE candidate addition skipped:', candErr);
               }
-            } catch (candErr) {
-              console.warn('ICE candidate addition skipped:', candErr);
+            } else {
+              // Queue candidate until remoteDescription is set!
+              pendingCandidatesRef.current[from] = [
+                ...(pendingCandidatesRef.current[from] || []),
+                candidate,
+              ];
             }
           }
         } catch (e) {
@@ -1188,6 +1379,26 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       setIsScreenSharing(false);
       setShowScreenPreview(false);
       setActiveScreenSharer(null);
+
+      // Remove screen senders from all peer connections and renegotiate
+      Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+        try {
+          const sender = screenSendersRef.current[peerName];
+          if (sender) {
+            pc.removeTrack(sender);
+            delete screenSendersRef.current[peerName];
+          }
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          channelRef.current?.send('WEBRTC_SIGNAL', {
+            from: myName,
+            to: peerName,
+            type: 'offer',
+            sdp: offer,
+          });
+        } catch (e) {}
+      });
+
       channelRef.current?.send('SCREEN_SHARE_STOPPED', { sharerName: myName });
       if (livekitRoomRef.current) {
         livekitRoomRef.current.localParticipant.setScreenShareEnabled(false).catch(() => {});
@@ -1201,27 +1412,89 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       }
 
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true,
+        } as any);
         setScreenStream(stream);
         setIsScreenSharing(true);
         setShowScreenPreview(false);
         setActiveScreenSharer(myName);
-        channelRef.current?.send('SCREEN_SHARE_STARTED', { sharerName: myName });
 
-        if (livekitRoomRef.current) {
-          const videoTrack = stream.getVideoTracks()[0];
-          if (videoTrack) await livekitRoomRef.current.localParticipant.publishTrack(videoTrack);
+        const screenTrack = stream.getVideoTracks()[0];
+        const screenStreamId = stream.id;
+        const screenTrackId = screenTrack?.id;
+
+        // Publish screen track to all connected WebRTC peers
+        Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+          try {
+            if (screenTrack) {
+              const sender = pc.addTrack(screenTrack, stream);
+              screenSendersRef.current[peerName] = sender;
+            }
+            const audioTrack = stream.getAudioTracks()[0];
+            if (audioTrack) {
+              pc.addTrack(audioTrack, stream);
+            }
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            channelRef.current?.send('WEBRTC_SIGNAL', {
+              from: myName,
+              to: peerName,
+              type: 'offer',
+              sdp: offer,
+            });
+          } catch (e) {
+            console.warn('Screen share offer error to', peerName, e);
+          }
+        });
+
+        // Broadcast to all participants in the room
+        channelRef.current?.send('SCREEN_SHARE_STARTED', {
+          sharerName: myName,
+          streamId: screenStreamId,
+          trackId: screenTrackId,
+        });
+
+        if (livekitRoomRef.current && screenTrack) {
+          await livekitRoomRef.current.localParticipant.publishTrack(screenTrack);
         }
 
-        stream.getVideoTracks()[0].onended = () => {
-          setIsScreenSharing(false);
-          setScreenStream(null);
-          setActiveScreenSharer(null);
-          channelRef.current?.send('SCREEN_SHARE_STOPPED', { sharerName: myName });
-          if (livekitRoomRef.current) {
-            livekitRoomRef.current.localParticipant.setScreenShareEnabled(false).catch(() => {});
-          }
-        };
+        // Native browser "Stop sharing" bar click handler
+        if (screenTrack) {
+          screenTrack.onended = () => {
+            if (stream) {
+              stream.getTracks().forEach((t) => t.stop());
+            }
+            setScreenStream(null);
+            setIsScreenSharing(false);
+            setShowScreenPreview(false);
+            setActiveScreenSharer(null);
+
+            Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+              try {
+                const sender = screenSendersRef.current[peerName];
+                if (sender) {
+                  pc.removeTrack(sender);
+                  delete screenSendersRef.current[peerName];
+                }
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                channelRef.current?.send('WEBRTC_SIGNAL', {
+                  from: myName,
+                  to: peerName,
+                  type: 'offer',
+                  sdp: offer,
+                });
+              } catch (e) {}
+            });
+
+            channelRef.current?.send('SCREEN_SHARE_STOPPED', { sharerName: myName });
+            if (livekitRoomRef.current) {
+              livekitRoomRef.current.localParticipant.setScreenShareEnabled(false).catch(() => {});
+            }
+          };
+        }
       } catch (err) {
         console.log('Screen share cancelled or failed:', err);
       }
@@ -1241,26 +1514,20 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }, 2400);
   };
 
-  // Join Action
-  const handleJoinClick = (directBypass = false) => {
+  // Join Action - Host joins directly, Guests ALWAYS require host approval
+  const handleJoinClick = () => {
     triggerHaptic('medium');
     const name = userName.trim() || (isHost ? 'Host' : 'Guest User');
     setUserName(name);
 
-    // If host, directBypass, or no host is currently in meeting:
-    if (isHost || directBypass || !hostInMeeting) {
+    if (isHost) {
       playChime('admit');
       setWaitingToJoin(false);
       setInCall(true);
-      const shouldBeHost = isHost || !hostInMeeting;
-      if (shouldBeHost && !isHost) {
-        setIsHost(true);
-        registerCreatedMeeting(meetingId);
-      }
       const participant: Participant = {
-        id: (shouldBeHost ? 'host-' : 'guest-') + Date.now(),
+        id: 'host-' + Date.now(),
         name,
-        isHost: shouldBeHost,
+        isHost: true,
         audioEnabled: micEnabled,
         videoEnabled: camEnabled,
         handRaised: false,
@@ -1268,11 +1535,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         joinedAt: Date.now(),
       };
       setParticipants((prev) => [...prev.filter((p) => p.name !== name), participant]);
-      if (shouldBeHost) {
-        channelRef.current?.send('HOST_ARRIVED', { hostName: name });
-      }
+      channelRef.current?.send('HOST_ARRIVED', { hostName: name });
       channelRef.current?.send('USER_JOINED', participant);
     } else {
+      // Guest: Approval is strictly required! No open access bypass.
       playChime('knock');
       setWaitingToJoin(true);
       const req: JoinRequest = {
@@ -1285,9 +1551,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
   };
 
-  // Host Admits Guest
+  // Host Admits Guest - Passes existing roster so newcomer has all participants immediately
   const handleAdmitGuest = (req: JoinRequest) => {
-    channelRef.current?.send('ADMIT_GUEST', { guestName: req.name, guestId: req.id });
+    const myName = userName || (isHost ? 'Host' : 'Host');
     setPendingRequests((prev) => prev.filter((r) => r.id !== req.id));
 
     const newParticipant: Participant = {
@@ -1301,6 +1567,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       joinedAt: Date.now(),
     };
     setParticipants((prev) => [...prev.filter((p) => p.name !== newParticipant.name), newParticipant]);
+
+    channelRef.current?.send('ADMIT_GUEST', {
+      guestName: req.name,
+      guestId: req.id,
+      hostName: myName,
+      existingParticipants: [
+        ...participants.filter((p) => p.name !== req.name),
+        newParticipant,
+      ],
+    });
   };
 
   // Host Denies Guest
@@ -1736,24 +2012,25 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 </Link>
               </div>
             ) : waitingToJoin ? (
-              <div className="p-6 rounded-2xl bg-slate-900/90 border border-blue-500/40 text-center space-y-3.5 animate-in fade-in duration-300">
-                <div className="w-10 h-10 rounded-full border-3 border-blue-500 border-t-transparent animate-spin mx-auto" />
-                <h4 className="text-sm font-bold text-white">Asking to join...</h4>
-                <p className="text-xs text-slate-400 leading-relaxed">
-                  Waiting for host approval, or jump right into the room now.
-                </p>
-                <div className="pt-2 flex flex-col gap-2">
+              <div className="p-6 rounded-2xl bg-slate-900/90 border border-blue-500/40 text-center space-y-4 animate-in fade-in duration-300">
+                <div className="relative mx-auto w-12 h-12 flex items-center justify-center">
+                  <div className="w-12 h-12 rounded-full border-2 border-blue-500/30 border-t-blue-500 animate-spin" />
+                  <Users className="w-5 h-5 text-blue-400 absolute" />
+                </div>
+                <div className="space-y-1">
+                  <h4 className="text-base font-bold text-white">Waiting for host to let you in...</h4>
+                  <p className="text-xs text-slate-400 leading-relaxed max-w-xs mx-auto">
+                    Only admitted guests can join this call. The host will review your request shortly.
+                  </p>
+                </div>
+                <div className="pt-2">
                   <button
                     type="button"
-                    onClick={() => handleJoinClick(true)}
-                    className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md transition-all"
-                  >
-                    Join Room Directly (Open Access)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWaitingToJoin(false)}
-                    className="text-xs text-slate-400 hover:text-white underline transition-colors pt-1"
+                    onClick={() => {
+                      setWaitingToJoin(false);
+                      channelRef.current?.send('CANCEL_REQUEST_JOIN', { name: userName });
+                    }}
+                    className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-98 text-slate-300 font-semibold text-xs border border-slate-700 transition-colors"
                   >
                     Cancel request
                   </button>
@@ -1777,7 +2054,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="space-y-2.5 pt-1">
                   <button
                     type="button"
-                    onClick={() => handleJoinClick(false)}
+                    onClick={handleJoinClick}
                     className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-sm shadow-xl shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
                   >
                     <span>{isHost ? 'Join now' : 'Ask to join'}</span>
@@ -2032,87 +2309,121 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </div>
           )}
 
-          {isScreenSharing ? (
+          {Boolean(activeScreenSharer) ? (
             /* ========================================================= */
             /* GOOGLE MEET STYLE SIDE-BY-SIDE PRESENTATION STAGE */
             /* ========================================================= */
             <div className="flex-1 w-full h-full flex flex-col lg:flex-row gap-3 sm:gap-4 overflow-hidden p-1 sm:p-2">
               {/* Left/Center Stage: Screen Presentation */}
-              <div className="flex-1 h-full min-h-[280px] bg-slate-950 rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
-                {showScreenPreview ? (
-                  <>
-                    <video
-                      ref={screenShareVideoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-full object-contain bg-black"
-                    />
-                    {/* Top Overlay Bar */}
-                    <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
-                      <div className="bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
-                        <MonitorUp className="w-4 h-4 text-blue-400" />
-                        <span>You are presenting to everyone</span>
+              <div className="flex-1 h-full min-h-[300px] bg-slate-950 rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
+                {activeScreenSharer === (userName || (isHost ? 'Host' : 'Guest')) ? (
+                  /* THIS USER IS THE PRESENTER */
+                  showScreenPreview ? (
+                    <>
+                      <video
+                        ref={screenShareVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-contain bg-black"
+                      />
+                      {/* Top Overlay Bar */}
+                      <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
+                        <div className="bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
+                          <MonitorUp className="w-4 h-4 text-blue-400" />
+                          <span>You are presenting to everyone</span>
+                        </div>
+                        <div className="flex items-center gap-2 pointer-events-auto">
+                          <button
+                            type="button"
+                            onClick={() => setShowScreenPreview(false)}
+                            className="bg-slate-900/90 hover:bg-slate-800 text-slate-300 text-xs font-semibold px-3 py-1.5 rounded-xl shadow-md border border-white/10 transition-colors"
+                          >
+                            Hide preview (avoid mirror)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={toggleScreenShare}
+                            className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
+                          >
+                            <Square className="w-3 h-3 fill-current" />
+                            <span>Stop presenting</span>
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2 pointer-events-auto">
-                        <button
-                          type="button"
-                          onClick={() => setShowScreenPreview(false)}
-                          className="bg-slate-900/90 hover:bg-slate-800 text-slate-300 text-xs font-semibold px-3 py-1.5 rounded-xl shadow-md border border-white/10 transition-colors"
-                        >
-                          Hide preview (avoid mirror)
-                        </button>
+                    </>
+                  ) : (
+                    /* Google Meet Presenter Card (Prevents recursive mirror loop) */
+                    <div className="flex flex-col items-center justify-center text-center p-6 sm:p-10 space-y-5 animate-in fade-in zoom-in-95 duration-200 max-w-lg">
+                      <div className="w-20 h-20 rounded-3xl bg-blue-600/10 border border-blue-500/25 flex items-center justify-center text-[#0b5cff] shadow-xl shadow-blue-500/10">
+                        <MonitorUp className="w-10 h-10 animate-pulse" />
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-xs font-semibold text-blue-400">
+                          <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+                          <span>Presentation Live</span>
+                        </div>
+                        <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+                          You're presenting to everyone
+                        </h3>
+                        <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
+                          Your screen is being broadcasted live to everyone in this call.
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          To avoid an infinite mirror effect, your screen view is minimized here.
+                        </p>
+                      </div>
+
+                      <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
                         <button
                           type="button"
                           onClick={toggleScreenShare}
-                          className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
+                          className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center justify-center gap-2 transition-all border border-red-500/50"
                         >
-                          <Square className="w-3 h-3 fill-current" />
+                          <Square className="w-3.5 h-3.5 fill-current" />
                           <span>Stop presenting</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setShowScreenPreview(true)}
+                          className="w-full sm:w-auto px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
+                        >
+                          Show video preview
                         </button>
                       </div>
                     </div>
-                  </>
+                  )
                 ) : (
-                  /* Google Meet Presenter Card (Prevents recursive mirror loop) */
-                  <div className="flex flex-col items-center justify-center text-center p-6 sm:p-10 space-y-5 animate-in fade-in zoom-in-95 duration-200 max-w-lg">
-                    <div className="w-20 h-20 rounded-3xl bg-blue-600/10 border border-blue-500/25 flex items-center justify-center text-[#0b5cff] shadow-xl shadow-blue-500/10">
-                      <MonitorUp className="w-10 h-10 animate-pulse" />
-                    </div>
-
-                    <div className="space-y-2">
-                      <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-xs font-semibold text-blue-400">
-                        <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
-                        <span>Presentation Live</span>
+                  /* REMOTE USER IS VIEWING THE PRESENTATION */
+                  <div className="relative w-full h-full flex items-center justify-center bg-black">
+                    {remoteScreenStream ? (
+                      <video
+                        autoPlay
+                        playsInline
+                        className="w-full h-full object-contain bg-black"
+                        ref={(el) => {
+                          if (el && el.srcObject !== remoteScreenStream) {
+                            el.srcObject = remoteScreenStream;
+                            el.play().catch(() => {});
+                          }
+                        }}
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center justify-center text-center p-8 space-y-4">
+                        <div className="w-16 h-16 rounded-3xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 animate-pulse">
+                          <MonitorUp className="w-8 h-8" />
+                        </div>
+                        <div className="space-y-1">
+                          <h4 className="text-lg font-bold text-white">{activeScreenSharer} is presenting</h4>
+                          <p className="text-xs text-slate-400">Loading screen presentation feed...</p>
+                        </div>
                       </div>
-                      <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
-                        You're presenting to everyone
-                      </h3>
-                      <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
-                        Your screen is being broadcasted live to everyone in this call.
-                      </p>
-                      <p className="text-[11px] text-slate-500">
-                        To avoid an infinite mirror effect, your screen view is minimized here.
-                      </p>
-                    </div>
-
-                    <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={toggleScreenShare}
-                        className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center justify-center gap-2 transition-all border border-red-500/50"
-                      >
-                        <Square className="w-3.5 h-3.5 fill-current" />
-                        <span>Stop presenting</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setShowScreenPreview(true)}
-                        className="w-full sm:w-auto px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
-                      >
-                        Show video preview
-                      </button>
+                    )}
+                    <div className="absolute top-3 left-3 bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
+                      <MonitorUp className="w-4 h-4 text-blue-400 animate-pulse" />
+                      <span>{activeScreenSharer} is presenting</span>
                     </div>
                   </div>
                 )}
@@ -2182,87 +2493,162 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </div>
           ) : (
             /* ========================================================= */
-            /* DYNAMIC JUMMP MEET PARTICIPANT GRID (Unlimited users) */
+            /* DYNAMIC JUMMP MEET LANDSCAPE PARTICIPANT GRID */
             /* ========================================================= */
-            <div
-              className={`w-full h-full flex-1 grid gap-2 sm:gap-4 items-center justify-center overflow-y-auto p-1 ${
-                otherParticipants.length === 0
-                  ? 'grid-cols-1 max-w-4xl'
-                  : otherParticipants.length === 1
-                  ? 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
-                  : otherParticipants.length <= 3
-                  ? 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
-                  : otherParticipants.length <= 5
-                  ? 'grid-cols-2 sm:grid-cols-3 max-w-6xl'
-                  : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 max-w-7xl'
-              }`}
-            >
-              {/* Solo Mode with Waiting Tag & Quick Invite */}
+            <div className="w-full h-full flex-1 flex items-center justify-center overflow-hidden p-1 sm:p-2">
+              {/* Case 1: Solo Mode */}
               {otherParticipants.length === 0 ? (
-                <div
-                  className={`relative w-full h-full max-w-4xl aspect-[3/4] sm:aspect-video rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ${
-                    micEnabled && audioVolume > 15
-                      ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
-                      : 'border-slate-800/80'
-                  }`}
-                >
-                  {camEnabled ? (
-                    <video
-                      ref={inCallVideoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-full object-cover transform -scale-x-100"
-                    />
-                  ) : (
-                    <div className="w-24 h-24 rounded-2xl bg-blue-600 text-white text-3xl font-bold flex items-center justify-center shadow-2xl">
-                      {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
-                    </div>
-                  )}
-
-                  {/* Bottom Tag with Active Voice Wave */}
-                  <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-semibold border border-white/10 shadow-lg">
-                    <span>{userName || 'You'} (You)</span>
-                    {!micEnabled ? (
-                      <span className="p-1 rounded-md bg-red-500/20 text-red-400">
-                        <MicOff className="w-3 h-3" />
-                      </span>
-                    ) : audioVolume > 15 ? (
-                      <div className="flex items-end gap-0.5 h-3 ml-0.5">
-                        <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
-                        <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
-                        <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                <div className="w-full h-full flex items-center justify-center p-2 sm:p-4">
+                  <div
+                    className={`relative w-full max-w-4xl aspect-video max-h-[75vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ${
+                      micEnabled && audioVolume > 15
+                        ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
+                        : 'border-slate-800/80'
+                    }`}
+                  >
+                    {camEnabled ? (
+                      <video
+                        ref={inCallVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover transform -scale-x-100"
+                      />
+                    ) : (
+                      <div className="w-24 h-24 rounded-2xl bg-blue-600 text-white text-3xl font-bold flex items-center justify-center shadow-2xl">
+                        {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
                       </div>
-                    ) : null}
-                  </div>
+                    )}
 
-                  {/* Waiting Banner for Solo User */}
-                  <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md border border-white/10 px-4 py-2 rounded-2xl text-xs text-slate-200 flex items-center gap-2.5 shadow-xl">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                    <span>Waiting for others to join</span>
-                    <button
-                      type="button"
-                      onClick={copyMeetingLink}
-                      className="ml-1 px-2.5 py-1 rounded-lg bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-[11px] flex items-center gap-1 transition-colors"
-                      title="Copy meeting link"
-                    >
-                      {copied ? <Check className="w-3 h-3 text-emerald-300" /> : <Copy className="w-3 h-3" />}
-                      <span>{copied ? 'Copied' : 'Invite'}</span>
-                    </button>
-                  </div>
-
-                  {handRaised && (
-                    <div className="absolute top-4 right-4 bg-amber-500 text-slate-950 p-2 rounded-xl shadow-lg animate-bounce">
-                      <Hand className="w-5 h-5" />
+                    {/* Bottom Tag with Active Voice Wave */}
+                    <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-semibold border border-white/10 shadow-lg">
+                      <span>{userName || 'You'} (You)</span>
+                      {!micEnabled ? (
+                        <span className="p-1 rounded-md bg-red-500/20 text-red-400">
+                          <MicOff className="w-3 h-3" />
+                        </span>
+                      ) : audioVolume > 15 ? (
+                        <div className="flex items-end gap-0.5 h-3 ml-0.5">
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                        </div>
+                      ) : null}
                     </div>
-                  )}
+
+                    {/* Waiting Banner for Solo User */}
+                    <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md border border-white/10 px-4 py-2 rounded-2xl text-xs text-slate-200 flex items-center gap-2.5 shadow-xl">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                      <span>Waiting for others to join</span>
+                      <button
+                        type="button"
+                        onClick={copyMeetingLink}
+                        className="ml-1 px-2.5 py-1 rounded-lg bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-[11px] flex items-center gap-1 transition-colors"
+                        title="Copy meeting link"
+                      >
+                        {copied ? <Check className="w-3 h-3 text-emerald-300" /> : <Copy className="w-3 h-3" />}
+                        <span>{copied ? 'Copied' : 'Invite'}</span>
+                      </button>
+                    </div>
+
+                    {handRaised && (
+                      <div className="absolute top-4 right-4 bg-amber-500 text-slate-950 p-2 rounded-xl shadow-lg animate-bounce">
+                        <Hand className="w-5 h-5" />
+                      </div>
+                    )}
+                  </div>
                 </div>
-              ) : (
-                // Multi-Participant Grid
-                <>
+              ) : otherParticipants.length === 1 ? (
+                /* Case 2: Exactly 2 Participants (1 Remote + 1 Local) - Horizontal Landscape Tiles */
+                <div className="w-full h-full flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 max-w-5xl mx-auto p-2 sm:p-4">
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-lg flex items-center justify-center transition-all duration-300 ${
+                    className={`relative w-full aspect-video max-h-[43vh] sm:max-h-[68vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl flex items-center justify-center transition-all duration-300 ${
+                      micEnabled && audioVolume > 15
+                        ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
+                        : 'border-slate-800/80'
+                    }`}
+                  >
+                    {camEnabled ? (
+                      <video
+                        ref={inCallVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover transform -scale-x-100"
+                      />
+                    ) : (
+                      <div className="w-16 h-16 rounded-2xl bg-blue-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                        {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
+                      </div>
+                    )}
+                    <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-semibold border border-white/10 shadow-md">
+                      <span>{userName || 'You'}</span>
+                      {!micEnabled ? (
+                        <MicOff className="w-3 h-3 text-red-400" />
+                      ) : audioVolume > 15 ? (
+                        <div className="flex items-end gap-0.5 h-2.5">
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                        </div>
+                      ) : null}
+                    </div>
+                    {handRaised && (
+                      <div className="absolute top-2.5 right-2.5 bg-amber-500 text-slate-950 p-1.5 rounded-xl shadow-md animate-bounce">
+                        <Hand className="w-4 h-4" />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Remote Participant Tile */}
+                  {otherParticipants.map((participant) => {
+                    const remoteStream = remoteStreams[participant.name];
+                    return (
+                      <div
+                        key={participant.id}
+                        className="relative w-full aspect-video max-h-[43vh] sm:max-h-[68vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center"
+                      >
+                        {remoteStream ? (
+                          <video
+                            autoPlay
+                            playsInline
+                            className="w-full h-full object-cover"
+                            ref={(el) => {
+                              if (el && el.srcObject !== remoteStream) {
+                                el.srcObject = remoteStream;
+                                el.play().catch(() => {});
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="flex flex-col items-center gap-2">
+                            <div className="w-16 h-16 rounded-2xl bg-indigo-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                              {participant.name.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                              <span>Connected</span>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
+                          <span>{participant.name}</span>
+                          {participant.isHost && (
+                            <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                /* Case 3: 3+ Participants - Responsive Landscape Grid */
+                <div className="w-full h-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 max-w-6xl mx-auto items-center justify-center overflow-y-auto p-2 sm:p-4">
+                  {/* Local User Tile */}
+                  <div
+                    className={`relative w-full aspect-video max-h-[38vh] sm:max-h-[44vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl flex items-center justify-center transition-all duration-300 ${
                       micEnabled && audioVolume > 15
                         ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
                         : 'border-slate-800/80'
@@ -2303,11 +2689,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   {/* Remote Participant Tiles */}
                   {otherParticipants.map((participant) => {
                     const remoteStream = remoteStreams[participant.name];
-
                     return (
                       <div
                         key={participant.id}
-                        className="relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-lg flex items-center justify-center"
+                        className="relative w-full aspect-video max-h-[38vh] sm:max-h-[44vh] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center"
                       >
                         {remoteStream ? (
                           <video
@@ -2342,7 +2727,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       </div>
                     );
                   })}
-                </>
+                </div>
               )}
             </div>
           )}
