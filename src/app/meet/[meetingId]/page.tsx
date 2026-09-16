@@ -235,8 +235,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   ]);
   const [interimTranscript, setInterimTranscript] = useState<{ speaker: string; text: string } | null>(null);
   const [activeSpeakers, setActiveSpeakers] = useState<Set<string>>(new Set());
+  const [dominantSpeaker, setDominantSpeaker] = useState<string | null>(null);
+  const dominantSpeakerTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [newCustomNote, setNewCustomNote] = useState('');
   const recognitionRef = useRef<any>(null);
+  const isStartingOrRunningRef = useRef(false);
   const isSpeakingBroadcastingRef = useRef(false);
   const latestMeetingStateRef = useRef({
     activePanel,
@@ -1931,6 +1934,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             });
           }, 2500);
         }
+      } else if (msg.type === 'TRANSCRIPT_UPDATE') {
+        if (msg.payload?.id && msg.payload?.text) {
+          setMeetingNotes((prev) =>
+            prev.map((n) =>
+              n.id === msg.payload.id
+                ? { ...n, text: msg.payload.text, time: msg.payload.time || n.time, timestamp: msg.payload.timestamp || n.timestamp }
+                : n
+            )
+          );
+          setInterimTranscript(null);
+          const sName = (msg.payload.speaker || '').trim().toLowerCase();
+          if (sName) setActiveSpeakers((prev) => new Set(prev).add(sName));
+        }
       } else if (msg.type === 'TRANSCRIPT_INTERIM') {
         if (msg.payload?.speaker && msg.payload?.text) {
           setInterimTranscript(msg.payload);
@@ -2101,7 +2117,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     showToast,
   ]);
 
-  // Real-time Web Speech Recognition & AI Live Notes
+  // Real-time Web Speech Recognition & AI Live Notes (Continuous & Resilient)
   useEffect(() => {
     if (!inCall) return;
 
@@ -2109,17 +2125,40 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       typeof window !== 'undefined' &&
       ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
 
-    if (!SpeechRecognitionClass) return;
+    if (!SpeechRecognitionClass) {
+      console.warn('[SpeechRecognition] Web Speech API not supported in this browser.');
+      return;
+    }
 
     let isStopped = false;
     let recognition: any = null;
+    let restartTimeout: NodeJS.Timeout | null = null;
+
+    const safeStart = () => {
+      if (isStopped || !inCall || !micEnabled || !recognition) return;
+      try {
+        recognition.start();
+      } catch (err: any) {
+        const msg = err?.message || '';
+        // If already active, great; otherwise schedule retry in 300ms
+        if (!msg.includes('already started')) {
+          if (restartTimeout) clearTimeout(restartTimeout);
+          restartTimeout = setTimeout(safeStart, 300);
+        }
+      }
+    };
 
     try {
       recognition = new SpeechRecognitionClass();
       recognition.continuous = true;
       recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
       recognition.lang = 'en-US';
       recognitionRef.current = recognition;
+
+      recognition.onstart = () => {
+        isStartingOrRunningRef.current = true;
+      };
 
       recognition.onresult = (event: any) => {
         const myName = (userName || (isHost ? 'Host' : 'Guest')).trim();
@@ -2127,10 +2166,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         let finalStr = '';
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            finalStr += event.results[i][0].transcript;
+          const item = event.results[i];
+          if (item.isFinal) {
+            finalStr += ' ' + item[0].transcript;
           } else {
-            interim += event.results[i][0].transcript;
+            interim += ' ' + item[0].transcript;
           }
         }
 
@@ -2148,17 +2188,39 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
         if (trimmedFinal) {
           setInterimTranscript(null);
-          const newEntry = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            speaker: myName,
-            text: trimmedFinal,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            timestamp: Date.now(),
-            isAutoTranscript: true,
-          };
+          const now = Date.now();
+          const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-          setMeetingNotes((prev) => [...prev, newEntry]);
-          channelRef.current?.send('TRANSCRIPT_ENTRY', newEntry);
+          setMeetingNotes((prev) => {
+            const lastNote = prev[prev.length - 1];
+            // If the same speaker spoke within the last 8 seconds, seamlessly merge to build complete continuous sentences!
+            if (
+              lastNote &&
+              lastNote.speaker.trim().toLowerCase() === myName.toLowerCase() &&
+              (now - lastNote.timestamp) < 8000
+            ) {
+              const updatedNote = {
+                ...lastNote,
+                text: `${lastNote.text.trim()} ${trimmedFinal}`,
+                time: timeStr,
+                timestamp: now,
+              };
+              channelRef.current?.send('TRANSCRIPT_UPDATE', updatedNote);
+              return [...prev.slice(0, -1), updatedNote];
+            }
+
+            // Otherwise, create a new transcript block
+            const newEntry = {
+              id: `${now}-${Math.random().toString(36).slice(2, 6)}`,
+              speaker: myName,
+              text: trimmedFinal,
+              time: timeStr,
+              timestamp: now,
+              isAutoTranscript: true,
+            };
+            channelRef.current?.send('TRANSCRIPT_ENTRY', newEntry);
+            return [...prev, newEntry];
+          });
 
           setActiveSpeakers((prev) => new Set(prev).add(myName.toLowerCase()));
           setTimeout(() => {
@@ -2167,31 +2229,54 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               next.delete(myName.toLowerCase());
               return next;
             });
-          }, 2000);
+          }, 2500);
         }
       };
 
-      recognition.onerror = () => {};
+      recognition.onerror = (err: any) => {
+        isStartingOrRunningRef.current = false;
+        if (err.error === 'not-allowed' || err.error === 'service-not-allowed') {
+          console.warn('[SpeechRecognition] Microphone permission denied');
+          isStopped = true;
+          return;
+        }
+        // For 'no-speech', 'audio-capture', 'network', 'aborted': automatically restart
+        if (!isStopped && inCall && micEnabled) {
+          if (restartTimeout) clearTimeout(restartTimeout);
+          restartTimeout = setTimeout(safeStart, 300);
+        }
+      };
 
       recognition.onend = () => {
+        isStartingOrRunningRef.current = false;
+        // Keep listening continuously as long as mic is enabled and in call
         if (!isStopped && inCall && micEnabled) {
-          try {
-            recognition.start();
-          } catch {}
+          if (restartTimeout) clearTimeout(restartTimeout);
+          restartTimeout = setTimeout(safeStart, 200);
         }
       };
 
       if (micEnabled) {
-        try {
-          recognition.start();
-        } catch {}
+        safeStart();
       }
-    } catch {}
+    } catch (err) {
+      console.warn('[SpeechRecognition] Initialization failed:', err);
+    }
+
+    // Liveness watchdog: checks every 2.5s and revives speech recognition if the browser dropped it
+    const watchdogTimer = setInterval(() => {
+      if (!isStopped && inCall && micEnabled && !isStartingOrRunningRef.current) {
+        safeStart();
+      }
+    }, 2500);
 
     return () => {
       isStopped = true;
+      if (restartTimeout) clearTimeout(restartTimeout);
+      clearInterval(watchdogTimer);
+      isStartingOrRunningRef.current = false;
       try {
-        recognition?.stop();
+        recognition?.abort();
       } catch {}
       recognitionRef.current = null;
     };
@@ -2221,6 +2306,35 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const isLocalSpeaking =
     (micEnabled && audioVolume > 15) ||
     activeSpeakers.has((userName || (isHost ? 'Host' : 'Guest')).trim().toLowerCase());
+
+  // Dominant active speaker tracking (with a 2.2s smoothing hold to prevent jerky layout switches)
+  useEffect(() => {
+    const localNorm = (userName || (isHost ? 'Host' : 'Guest')).trim().toLowerCase();
+    const isLocalSpk = (micEnabled && audioVolume > 15) || activeSpeakers.has(localNorm);
+
+    // Find remote speaker if any
+    const remoteSpeaker = otherParticipants.find((p) =>
+      activeSpeakers.has(p.name.trim().toLowerCase())
+    );
+
+    let speaker: string | null = null;
+    if (remoteSpeaker) {
+      speaker = remoteSpeaker.name.trim().toLowerCase();
+    } else if (isLocalSpk) {
+      speaker = localNorm;
+    }
+
+    if (speaker) {
+      if (dominantSpeakerTimerRef.current) clearTimeout(dominantSpeakerTimerRef.current);
+      setDominantSpeaker(speaker);
+      dominantSpeakerTimerRef.current = setTimeout(() => {
+        setDominantSpeaker(null);
+      }, 2200);
+    }
+  }, [activeSpeakers, audioVolume, micEnabled, otherParticipants, userName, isHost]);
+
+  const localNormName = (userName || (isHost ? 'Host' : 'Guest')).trim().toLowerCase();
+  const isLocalDominant = dominantSpeaker === localNormName;
 
   // Auto-scroll Notes to bottom when new note arrives
   useEffect(() => {
@@ -3998,10 +4112,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="w-full h-full flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-6 w-full max-w-[98vw] 2xl:max-w-[99vw] mx-auto p-1 sm:p-2">
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ${
-                      isLocalSpeaking
-                        ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
-                        : 'border-slate-800/80 shadow-xl'
+                    className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-500 ease-out ${
+                      isLocalDominant
+                        ? 'sm:flex-[1.9] lg:flex-[2.3] scale-[1.01] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10'
+                        : dominantSpeaker
+                        ? 'sm:flex-[1] scale-[0.98] border-slate-800/80 shadow-lg opacity-90'
+                        : isLocalSpeaking
+                        ? 'sm:flex-1 border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
+                        : 'sm:flex-1 border-slate-800/80 shadow-xl'
                     }`}
                   >
                     {camEnabled ? (
@@ -4061,14 +4179,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                     const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
                     const isRemoteSpeaking = activeSpeakers.has(participant.name.trim().toLowerCase());
+                    const isThisRemoteDominant = dominantSpeaker === participant.name.trim().toLowerCase();
 
                     return (
                       <div
                         key={participant.id}
-                        className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-300 ${
-                          isRemoteSpeaking
-                            ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
-                            : 'border-slate-800/80 shadow-xl'
+                        className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-500 ease-out ${
+                          isThisRemoteDominant
+                            ? 'sm:flex-[1.9] lg:flex-[2.3] scale-[1.01] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10'
+                            : dominantSpeaker
+                            ? 'sm:flex-[1] scale-[0.98] border-slate-800/80 shadow-lg opacity-90'
+                            : isRemoteSpeaking
+                            ? 'sm:flex-1 border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
+                            : 'sm:flex-1 border-slate-800/80 shadow-xl'
                         }`}
                       >
                         {remoteStream && !isVideoStopped ? (
@@ -4184,14 +4307,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   })}
                 </div>
               ) : (
-                /* Case 3: 3+ Participants - Responsive Landscape Grid */
+                /* Case 3: 3+ Participants - Responsive Dynamic Active-Speaker Grid */
                 <div className="w-full h-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 w-full max-w-[98vw] 2xl:max-w-[99vw] mx-auto items-center justify-center overflow-y-auto p-1 sm:p-2">
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full aspect-video max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ${
-                      isLocalSpeaking
-                        ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
-                        : 'border-slate-800/80 shadow-xl'
+                    className={`relative w-full aspect-video rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-500 ease-out ${
+                      isLocalDominant
+                        ? 'order-first sm:col-span-2 sm:row-span-2 min-h-[360px] sm:min-h-[460px] xl:min-h-[520px] max-h-[75vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10 scale-[1.01]'
+                        : dominantSpeaker
+                        ? 'sm:col-span-1 max-h-[40vh] border-slate-800/80 shadow-md opacity-90 scale-[0.98]'
+                        : isLocalSpeaking
+                        ? 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
+                        : 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
                     }`}
                   >
                     {camEnabled ? (
@@ -4251,14 +4378,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                     const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
                     const isRemoteSpeaking = activeSpeakers.has(participant.name.trim().toLowerCase());
+                    const isThisRemoteDominant = dominantSpeaker === participant.name.trim().toLowerCase();
 
                     return (
                       <div
                         key={participant.id}
-                        className={`relative w-full aspect-video max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-300 ${
-                          isRemoteSpeaking
-                            ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
-                            : 'border-slate-800/80 shadow-xl'
+                        className={`relative w-full aspect-video rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-500 ease-out ${
+                          isThisRemoteDominant
+                            ? 'order-first sm:col-span-2 sm:row-span-2 min-h-[360px] sm:min-h-[460px] xl:min-h-[520px] max-h-[75vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10 scale-[1.01]'
+                            : dominantSpeaker
+                            ? 'sm:col-span-1 max-h-[40vh] border-slate-800/80 shadow-md opacity-90 scale-[0.98]'
+                            : isRemoteSpeaking
+                            ? 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
+                            : 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
                         }`}
                       >
                         {remoteStream && !isVideoStopped ? (

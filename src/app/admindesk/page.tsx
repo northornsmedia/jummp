@@ -140,19 +140,35 @@ async function safeJsonParse(res: Response): Promise<{ ok: boolean; status: numb
       return { ok: res.ok, status: res.status, data };
     }
     const text = await res.text();
-    const cleanSnippet = text.replace(/<[^>]*>?/gm, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+    // Strip styles and scripts before extracting text to prevent logging CSS rules or JSON blobs from HTML error pages
+    const stripped = text
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<pre[^>]*>([\s\S]*?)<\/pre>/gi, ' $1 ')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const isHtml = text.includes('<!DOCTYPE') || text.includes('<html') || text.includes('__NEXT_DATA__');
+    let readableError = stripped;
+    if (isHtml || !readableError || readableError.includes('body{display')) {
+      readableError = `HTTP ${res.status} (${res.statusText || (res.status === 500 ? 'Internal Server Error' : 'Server Error')})`;
+    } else if (readableError.length > 120) {
+      readableError = readableError.slice(0, 120) + '...';
+    }
+
     return {
       ok: false,
       status: res.status,
       data: null,
-      errorText: cleanSnippet || `HTTP ${res.status} (${res.statusText || 'Server Error'})`,
+      errorText: readableError,
     };
   } catch (e: any) {
     return {
       ok: false,
       status: res.status,
       data: null,
-      errorText: e.message || 'Failed to parse response',
+      errorText: e.message || `HTTP ${res.status} error`,
     };
   }
 }
@@ -210,6 +226,7 @@ export default function AdminDeskPage() {
   }, []);
 
   // Fetch status payload
+  const lastStatusErrorRef = useRef<string | null>(null);
   const fetchStatus = useCallback(async (isManual = false) => {
     if (isManual) setRefreshing(true);
     try {
@@ -226,6 +243,10 @@ export default function AdminDeskPage() {
       setData(payload);
       setIsAuthenticated(true);
       setLastSyncTime(Date.now());
+      if (lastStatusErrorRef.current) {
+        addLog('success', 'System status connection restored.');
+        lastStatusErrorRef.current = null;
+      }
 
       // Track latency history for live sparkline
       const dbCheck = payload.checks.find((c) => c.category === 'database');
@@ -237,7 +258,11 @@ export default function AdminDeskPage() {
         addLog('success', `Diagnostic refresh completed in ${payload.scanDurationMs}ms (Status: ${payload.overallStatus.toUpperCase()})`);
       }
     } catch (err: any) {
-      addLog('error', `Failed to query system status: ${err.message}`);
+      const msg = err?.message || 'Server error';
+      if (lastStatusErrorRef.current !== msg || isManual) {
+        lastStatusErrorRef.current = msg;
+        addLog('error', `Failed to query system status: ${msg}`);
+      }
     } finally {
       setLoading(false);
       if (isManual) setRefreshing(false);
@@ -524,19 +549,19 @@ export default function AdminDeskPage() {
   const rtHeadroom = Math.max(0, 200 - currentRtConn);
   const rtConsumedPct = Math.min(100, Math.max(1, Math.round((currentRtConn / 200) * 100)));
 
-  const currentMau = Math.max(25, data?.metrics.totalParticipants || 25);
+  const currentMau = data?.metrics.totalParticipants || 0;
   const mauHeadroom = (50000 - currentMau).toLocaleString();
-  const mauConsumedPct = Math.min(100, Math.max(0.1, Number(((currentMau / 50000) * 100).toFixed(1))));
+  const mauConsumedPct = Math.min(100, Math.max(0.01, Number(((currentMau / 50000) * 100).toFixed(2))));
 
   const currentWebRtc = data?.metrics.liveWebRtcParticipants || 0;
   const webrtcHeadroom = Math.max(0, 100 - currentWebRtc);
   const webrtcConsumedPct = Math.min(100, Number(((currentWebRtc / 100) * 100).toFixed(1)));
 
   const minLimitItem = data?.limits.find((l) => l.name === 'Participant Streaming Minutes');
-  const rawMins = minLimitItem?.used || data?.metrics.totalParticipantStreamingMinutes || 0;
-  const currentStreamingMins = Math.max(300, Math.round(rawMins * 10) / 10);
+  const rawMins = minLimitItem?.used ?? data?.metrics.totalParticipantStreamingMinutes ?? 0;
+  const currentStreamingMins = Math.round(rawMins * 10) / 10;
   const minsHeadroom = (100000 - currentStreamingMins).toLocaleString();
-  const minsConsumedPct = Math.min(100, Math.max(0.3, Number(((currentStreamingMins / 100000) * 100).toFixed(1))));
+  const minsConsumedPct = Math.min(100, Math.max(0.01, Number(((currentStreamingMins / 100000) * 100).toFixed(2))));
 
   // ---------------------------------------------------------------------------
   // IF NOT AUTHENTICATED: RENDER APPLE-GRADE ADMIN LOGIN SCREEN
