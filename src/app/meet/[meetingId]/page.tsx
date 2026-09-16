@@ -4274,87 +4274,55 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               {/* Left/Center Stage: Screen Presentation */}
               <div className="flex-1 w-full min-h-0 lg:h-full bg-slate-950 rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
                 {activeScreenSharer === (userName || (isHost ? 'Host' : 'Guest')) ? (
-                  /* THIS USER IS THE PRESENTER */
-                  showScreenPreview ? (
-                    <>
+                  /* THIS USER IS THE PRESENTER - Google Meet Presenter Stage with Small Preview Window */
+                  <div className="relative w-full h-full flex flex-col items-center justify-center text-center p-3 sm:p-6 space-y-4 animate-in fade-in duration-200">
+                    {/* Top Overlay Bar */}
+                    <div className="w-full flex items-center justify-between gap-2 px-2 sm:px-4">
+                      <div className="bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2">
+                        <MonitorUp className="w-4 h-4 text-blue-400" />
+                        <span>You are presenting to everyone</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={toggleScreenShare}
+                        className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
+                      >
+                        <Square className="w-3 h-3 fill-current" />
+                        <span>Stop presenting</span>
+                      </button>
+                    </div>
+
+                    {/* Google Meet Small Preview Window */}
+                    <div className="relative w-full max-w-sm sm:max-w-md aspect-video rounded-2xl sm:rounded-3xl bg-black border-2 border-blue-500/60 shadow-2xl shadow-blue-500/20 overflow-hidden group">
                       <video
-                        ref={screenShareVideoRef}
+                        ref={(el) => {
+                          screenShareVideoRef.current = el;
+                          if (el && screenStream && el.srcObject !== screenStream) {
+                            el.srcObject = screenStream;
+                            el.play().catch(() => {});
+                          }
+                        }}
                         autoPlay
                         playsInline
                         muted
                         className="w-full h-full object-contain bg-black"
                       />
-                      {/* Top Overlay Bar */}
-                      <div className="absolute top-2 sm:top-3 left-2 sm:left-3 right-2 sm:right-3 flex items-center justify-between gap-2 pointer-events-none">
-                        <div className="bg-slate-900/90 backdrop-blur-md px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
-                          <MonitorUp className="w-4 h-4 text-blue-400" />
-                          <span className="hidden sm:inline">You are presenting to everyone</span>
-                          <span className="sm:hidden">Presenting</span>
-                        </div>
-                        <div className="flex items-center gap-2 pointer-events-auto">
-                          <button
-                            type="button"
-                            onClick={() => setShowScreenPreview(false)}
-                            className="bg-slate-900/90 hover:bg-slate-800 text-slate-300 text-xs font-semibold p-2 sm:px-3 sm:py-1.5 rounded-xl shadow-md border border-white/10 transition-colors"
-                            aria-label="Hide screen preview"
-                          >
-                            <Minimize2 className="w-3.5 h-3.5 sm:hidden" />
-                            <span className="hidden sm:inline">Hide preview (avoid mirror)</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={toggleScreenShare}
-                            className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold p-2 sm:px-3.5 sm:py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
-                          >
-                            <Square className="w-3 h-3 fill-current" />
-                            <span className="hidden sm:inline">Stop presenting</span>
-                          </button>
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    /* Google Meet Presenter Card (Prevents recursive mirror loop) */
-                    <div className="flex flex-col items-center justify-center text-center p-6 sm:p-10 space-y-5 animate-in fade-in zoom-in-95 duration-200 max-w-lg">
-                      <div className="w-20 h-20 rounded-3xl bg-blue-600/10 border border-blue-500/25 flex items-center justify-center text-[#0b5cff] shadow-xl shadow-blue-500/10">
-                        <MonitorUp className="w-10 h-10 animate-pulse" />
-                      </div>
-
-                      <div className="space-y-2">
-                        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-xs font-semibold text-blue-400">
-                          <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
-                          <span>Presentation Live</span>
-                        </div>
-                        <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
-                          You&apos;re presenting to everyone
-                        </h3>
-                        <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
-                          Your screen is being broadcasted live to everyone in this call.
-                        </p>
-                        <p className="text-[11px] text-slate-500">
-                          To avoid an infinite mirror effect, your screen view is minimized here.
-                        </p>
-                      </div>
-
-                      <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
-                        <button
-                          type="button"
-                          onClick={toggleScreenShare}
-                          className="w-full sm:w-auto px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center justify-center gap-2 transition-all border border-red-500/50"
-                        >
-                          <Square className="w-3.5 h-3.5 fill-current" />
-                          <span>Stop presenting</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setShowScreenPreview(true)}
-                          className="w-full sm:w-auto px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold border border-slate-800 transition-colors"
-                        >
-                          Show video preview
-                        </button>
+                      <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl text-[10px] font-bold text-blue-400 border border-blue-500/30">
+                        <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+                        <span>Your Screen (Live Preview)</span>
                       </div>
                     </div>
-                  )
+
+                    {/* Presentation Status Description */}
+                    <div className="space-y-1 max-w-sm">
+                      <h4 className="text-sm sm:text-base font-bold text-white">
+                        Your screen is visible to all participants
+                      </h4>
+                      <p className="text-[11px] sm:text-xs text-slate-400">
+                        You are sharing your screen. Other participants see your presentation in full view.
+                      </p>
+                    </div>
+                  </div>
                 ) : (
                   /* REMOTE USER IS VIEWING THE PRESENTATION */
                   <div className="relative w-full h-full flex items-center justify-center bg-black">
@@ -4617,14 +4585,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="w-full h-full min-h-0 grid grid-cols-1 grid-rows-2 sm:flex sm:flex-row items-stretch sm:items-center justify-center gap-2 sm:gap-6 max-w-[98vw] 2xl:max-w-[99vw] mx-auto p-1 sm:p-2">
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-500 ease-out ${
-                      isLocalDominant
-                        ? 'sm:flex-[1.9] lg:flex-[2.3] scale-[1.01] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10'
-                        : dominantSpeaker
-                        ? 'sm:flex-[1] scale-[0.98] border-slate-800/80 shadow-lg opacity-90'
-                        : isLocalSpeaking
-                        ? 'sm:flex-1 border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
-                        : 'sm:flex-1 border-slate-800/80 shadow-xl'
+                    className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ease-out sm:flex-1 ${
+                      isLocalSpeaking
+                        ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 z-10'
+                        : 'border-slate-800/80 shadow-xl'
                     }`}
                   >
                     {camEnabled ? (
@@ -4689,14 +4653,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     return (
                       <div
                         key={participant.id}
-                        className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-500 ease-out ${
-                          isThisRemoteDominant
-                            ? 'sm:flex-[1.9] lg:flex-[2.3] scale-[1.01] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10'
-                            : dominantSpeaker
-                            ? 'sm:flex-[1] scale-[0.98] border-slate-800/80 shadow-lg opacity-90'
-                            : isRemoteSpeaking
-                            ? 'sm:flex-1 border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
-                            : 'sm:flex-1 border-slate-800/80 shadow-xl'
+                        className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-300 ease-out sm:flex-1 ${
+                          isRemoteSpeaking
+                            ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 z-10'
+                            : 'border-slate-800/80 shadow-xl'
                         }`}
                       >
                         {remoteStream && !isVideoStopped ? (
@@ -4824,14 +4784,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 >
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video rounded-xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl sm:shadow-2xl flex items-center justify-center transition-all duration-300 sm:duration-500 ease-out ${
-                      isLocalDominant
-                        ? 'order-first border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40 z-10 sm:col-span-2 sm:row-span-2 sm:min-h-[460px] xl:min-h-[520px] sm:max-h-[75vh] sm:scale-[1.01] sm:ring-offset-2 sm:ring-offset-slate-950'
-                        : dominantSpeaker
-                        ? 'sm:col-span-1 sm:max-h-[40vh] border-slate-800/80 shadow-md sm:opacity-90 sm:scale-[0.98]'
-                        : isLocalSpeaking
-                        ? 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40'
-                        : 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
+                    className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video rounded-xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl sm:shadow-2xl flex items-center justify-center transition-all duration-300 sm:duration-500 ease-out sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] ${
+                      isLocalSpeaking
+                        ? 'border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40 z-10'
+                        : 'border-slate-800/80 shadow-xl'
                     }`}
                   >
                     {camEnabled ? (
@@ -4896,14 +4852,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     return (
                       <div
                         key={participant.id}
-                        className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video rounded-xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl sm:shadow-2xl flex items-center justify-center group transition-all duration-300 sm:duration-500 ease-out ${
-                          isThisRemoteDominant
-                            ? 'order-first border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40 z-10 sm:col-span-2 sm:row-span-2 sm:min-h-[460px] xl:min-h-[520px] sm:max-h-[75vh] sm:scale-[1.01] sm:ring-offset-2 sm:ring-offset-slate-950'
-                            : dominantSpeaker
-                            ? 'sm:col-span-1 sm:max-h-[40vh] border-slate-800/80 shadow-md sm:opacity-90 sm:scale-[0.98]'
-                            : isRemoteSpeaking
-                            ? 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40'
-                            : 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
+                        className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video rounded-xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl sm:shadow-2xl flex items-center justify-center group transition-all duration-300 sm:duration-500 ease-out sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] ${
+                          isRemoteSpeaking
+                            ? 'border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40 z-10'
+                            : 'border-slate-800/80 shadow-xl'
                         }`}
                       >
                         {remoteStream && !isVideoStopped ? (
