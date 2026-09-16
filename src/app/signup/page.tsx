@@ -9,6 +9,7 @@ import {
   ArrowRight,
   Mail,
   User,
+  Phone,
   Lock,
   Sparkles,
   CheckCircle2,
@@ -18,75 +19,24 @@ import {
   Zap,
   Star,
   Users,
-  Check,
+  Radio,
+  Layers,
 } from 'lucide-react';
 import ViewportIndicator from '@/components/common/ViewportIndicator';
 import { supabase } from '@/lib/supabaseClient';
 
-const PLANS_CONFIG: Record<
-  string,
-  {
-    name: string;
-    priceMonthly: string;
-    description: string;
-    badge?: string;
-    features: string[];
-  }
-> = {
-  starter: {
-    name: 'Starter',
-    priceMonthly: '₹999',
-    description: 'Perfect for solo creators & small interactive workshops.',
-    features: [
-      'Unlimited attendees per session',
-      '1 active concurrent room',
-      '1080p Full HD streaming',
-      'Live chat, Q&A & polls',
-    ],
-  },
-  pro: {
-    name: 'Pro',
-    priceMonthly: '₹1,999',
-    description: 'For growing businesses running frequent, high-impact webinars.',
-    badge: 'MOST POPULAR',
-    features: [
-      'Unlimited attendees (no seat caps)',
-      'Unlimited concurrent webinar rooms',
-      '1080p 60fps & 4K ultra-low latency',
-      'Timed offer cards & ticket sales',
-      'Real-time attendance & retention curves',
-      'Cloud recording & browser backup',
-    ],
-  },
-  enterprise: {
-    name: 'Enterprise',
-    priceMonthly: 'Custom',
-    description: 'Dedicated infrastructure, custom SLAs & white-label branding.',
-    features: [
-      '1M+ concurrent attendee support',
-      'Dedicated media server clusters',
-      'Custom white-label domain & SSL',
-      'Dedicated account manager & 99.99% SLA',
-    ],
-  },
-};
-
 function SignupContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const initialPlan = (searchParams.get('plan') || 'pro').toLowerCase();
-  const [selectedPlan, setSelectedPlan] = useState<string>(
-    PLANS_CONFIG[initialPlan] ? initialPlan : 'pro'
-  );
+  const initialPlan = (searchParams.get('plan') || '').toLowerCase();
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-
-  const activePlanInfo = PLANS_CONFIG[selectedPlan] || PLANS_CONFIG.pro;
 
   // Calculate simple password strength
   const getPasswordStrength = (pass: string) => {
@@ -113,6 +63,9 @@ function SignupContent() {
     setLoading(true);
     setErrorMsg('');
     try {
+      if (initialPlan && typeof window !== 'undefined') {
+        localStorage.setItem('jummp_preferred_plan', initialPlan);
+      }
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
@@ -135,33 +88,69 @@ function SignupContent() {
     setErrorMsg('');
 
     try {
+      // 1. Sign up with Supabase auth
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
           data: {
             full_name: name,
-            plan: selectedPlan,
+            phone: phone,
+            plan_unlocked: false,
+            preferred_plan: initialPlan || 'pro',
           },
         },
       });
-      if (error) {
-        setErrorMsg(error.message);
-      } else if (data.session) {
-        router.push('/dashboard');
-      } else {
-        setErrorMsg('Check your email to confirm your account before signing in.');
+
+      // 2. Persist profile locally for seamless instant transition to dashboard
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(
+          'jummp_user_profile',
+          JSON.stringify({
+            name,
+            email,
+            phone,
+            plan_unlocked: false,
+            preferred_plan: initialPlan || 'pro',
+          })
+        );
+        if (initialPlan) {
+          localStorage.setItem('jummp_preferred_plan', initialPlan);
+        }
       }
+
+      if (error) {
+        // If user already registered, inform them or attempt direct signin
+        if (error.message.toLowerCase().includes('already registered')) {
+          setErrorMsg('An account with this email already exists. Please sign in instead.');
+          setLoading(false);
+          return;
+        }
+        setErrorMsg(error.message);
+        setLoading(false);
+        return;
+      }
+
+      // 3. Attempt immediate signin if session wasn't auto-returned
+      if (!data?.session) {
+        try {
+          await supabase.auth.signInWithPassword({ email, password });
+        } catch {
+          // ignore error if email confirmation required
+        }
+      }
+
+      // 4. Directly open dashboard
+      router.push('/dashboard');
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : 'Unable to create your account.');
-    } finally {
       setLoading(false);
     }
   };
 
   return (
     <div className="w-full">
-      {/* FREE INSTANT MEETING CALLOUT BANNER (Polished & Constrained) */}
+      {/* FREE INSTANT MEETING CALLOUT BANNER */}
       <div className="mb-8 p-3.5 sm:p-4 rounded-2xl bg-gradient-to-r from-blue-500/10 via-indigo-500/5 to-white border border-blue-500/20 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-left">
         <div className="flex items-center gap-3.5">
           <div className="w-10 h-10 rounded-xl bg-[#0b5cff] text-white flex items-center justify-center shrink-0 shadow-md shadow-blue-500/25">
@@ -188,17 +177,15 @@ function SignupContent() {
         </Link>
       </div>
 
-      {/* TWO-COLUMN SPLIT HERO & REGISTRATION CONTAINER */}
+      {/* TWO-COLUMN SPLIT CONTAINER (NO PRICING ON SIGNUP) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-start">
-        {/* LEFT COLUMN: VALUE PROPOSITION & PLAN OVERVIEW */}
+        {/* LEFT COLUMN: PLATFORM VALUE PROPOSITION */}
         <div className="lg:col-span-6 space-y-6 text-left">
-          {/* Top Tag */}
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 border border-blue-200/80 text-[#0b5cff] text-xs font-bold tracking-wide">
             <Sparkles className="w-3.5 h-3.5" />
             <span>UNLIMITED WEBINAR BROADCASTING</span>
           </div>
 
-          {/* Main Headline */}
           <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-[#00053d] tracking-tight leading-[1.15]">
             Scale your events with <span className="text-[#0b5cff]">zero seat caps</span>.
           </h1>
@@ -207,71 +194,47 @@ function SignupContent() {
             Stream to 50 or 500,000 attendees with flat pricing, ultra-low latency WebRTC, and zero required downloads for participants.
           </p>
 
-          {/* Interactive Plan Selector Tabs */}
-          <div className="p-1.5 bg-slate-100/90 rounded-2xl border border-slate-200/80 flex items-center gap-1">
-            {(['starter', 'pro', 'enterprise'] as const).map((planKey) => {
-              const plan = PLANS_CONFIG[planKey];
-              const isSelected = selectedPlan === planKey;
-              return (
-                <button
-                  key={planKey}
-                  type="button"
-                  onClick={() => setSelectedPlan(planKey)}
-                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 ${
-                    isSelected
-                      ? 'bg-white text-[#00053d] shadow-sm border border-slate-200/60'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                  }`}
-                >
-                  <span>{plan.name}</span>
-                  {plan.badge && (
-                    <span className="hidden sm:inline text-[9px] px-1.5 py-0.2 bg-blue-100 text-[#0b5cff] rounded-md font-extrabold">
-                      HOT
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Active Plan Feature Checklist */}
-          <div className="p-5 rounded-2xl bg-white/80 backdrop-blur-sm border border-slate-200/80 shadow-xs space-y-3">
-            <div className="flex items-baseline justify-between pb-2 border-b border-slate-100">
-              <div>
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  Selected Plan
-                </span>
-                <div className="text-lg font-extrabold text-[#00053d] flex items-center gap-2">
-                  <span>{activePlanInfo.name} Plan</span>
-                  {activePlanInfo.badge && (
-                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-[#0b5cff] border border-blue-100">
-                      {activePlanInfo.badge}
-                    </span>
-                  )}
-                </div>
+          {/* 4 Feature Pillars (Clean architectural highlights, NOT pricing) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 pt-2">
+            <div className="p-4 rounded-2xl bg-white/80 border border-slate-200/80 shadow-xs space-y-1.5">
+              <div className="w-8 h-8 rounded-lg bg-blue-50 text-[#0b5cff] flex items-center justify-center">
+                <Users className="w-4 h-4" />
               </div>
-              <div className="text-right">
-                <span className="text-xl font-black text-[#0b5cff]">
-                  {activePlanInfo.priceMonthly}
-                </span>
-                {activePlanInfo.priceMonthly !== 'Custom' && (
-                  <span className="text-xs text-slate-500 font-medium"> /month</span>
-                )}
-              </div>
+              <h3 className="text-sm font-bold text-[#00053d]">Zero Seat Caps</h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Broadcast to massive crowds without per-seat penalties or surprise overage charges.
+              </p>
             </div>
 
-            <p className="text-xs text-slate-600 italic">
-              {activePlanInfo.description}
-            </p>
+            <div className="p-4 rounded-2xl bg-white/80 border border-slate-200/80 shadow-xs space-y-1.5">
+              <div className="w-8 h-8 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                <Zap className="w-4 h-4" />
+              </div>
+              <h3 className="text-sm font-bold text-[#00053d]">Sub-Second Latency</h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Real-time WebRTC media routing with crystal clear 1080p 60fps video quality.
+              </p>
+            </div>
 
-            <ul className="space-y-2 pt-1">
-              {activePlanInfo.features.map((feat, idx) => (
-                <li key={idx} className="flex items-center gap-2 text-xs text-slate-700 font-medium">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                  <span>{feat}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="p-4 rounded-2xl bg-white/80 border border-slate-200/80 shadow-xs space-y-1.5">
+              <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <Radio className="w-4 h-4" />
+              </div>
+              <h3 className="text-sm font-bold text-[#00053d]">100% In-Browser</h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                No apps, plugins, or installations. One-click link access for all your participants.
+              </p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white/80 border border-slate-200/80 shadow-xs space-y-1.5">
+              <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center">
+                <Layers className="w-4 h-4" />
+              </div>
+              <h3 className="text-sm font-bold text-[#00053d]">Interactive Studio</h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Moderated Q&A, live chat, real-time polls, and interactive offer cards.
+              </p>
+            </div>
           </div>
 
           {/* Social Proof & Security Badges */}
@@ -301,21 +264,14 @@ function SignupContent() {
             {/* Top Accent Gradient Line */}
             <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-[#0b5cff] via-indigo-500 to-cyan-400" />
 
-            {/* Selected Plan Tag & Trial Badge */}
-            <div className="flex items-center justify-between gap-2 mb-4">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 text-[#0b5cff] text-[11px] font-bold uppercase tracking-wider border border-blue-100">
-                <Sparkles className="w-3 h-3" />
-                <span>Selected: {activePlanInfo.name} Plan</span>
-              </div>
-              <span className="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-100">
-                14-Day Free Trial
-              </span>
-            </div>
-
             {/* Header */}
             <div className="mb-6">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-50 text-[#0b5cff] text-[11px] font-bold uppercase tracking-wider border border-blue-100 mb-3">
+                <Sparkles className="w-3 h-3" />
+                <span>Host & Broadcaster Registration</span>
+              </div>
               <h2 className="text-2xl sm:text-3xl font-extrabold text-[#00053d] tracking-tight">
-                Create {activePlanInfo.name} Account
+                Create your Account
               </h2>
               <p className="text-xs sm:text-sm text-slate-500 mt-1">
                 Join over 10,000+ teams streaming high-impact webinars on JUMMP.
@@ -362,12 +318,13 @@ function SignupContent() {
                 <div className="w-full border-t border-slate-200" />
               </div>
               <span className="relative bg-white px-3 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                Or corporate email
+                Or with details
               </span>
             </div>
 
-            {/* Email Registration Form */}
+            {/* Standard Registration Form (Name, Email, Phone Number, Password) */}
             <form onSubmit={handleSignup} className="space-y-4">
+              {/* Full Name */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
                   Full Name
@@ -385,6 +342,7 @@ function SignupContent() {
                 </div>
               </div>
 
+              {/* Corporate Email */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
                   Corporate Email
@@ -402,6 +360,25 @@ function SignupContent() {
                 </div>
               </div>
 
+              {/* Phone Number */}
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
+                  Phone Number
+                </label>
+                <div className="relative">
+                  <Phone className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="tel"
+                    required
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="+1 (555) 000-0000 / +91 98765 43210"
+                    className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 focus:border-[#0b5cff] focus:ring-2 focus:ring-blue-100 outline-none text-sm transition-all placeholder:text-slate-400"
+                  />
+                </div>
+              </div>
+
+              {/* Password */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="block text-xs font-bold uppercase tracking-wider text-slate-700">
@@ -457,16 +434,16 @@ function SignupContent() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full mt-2 py-3.5 px-4 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
+                className="w-full mt-3 py-3.5 px-4 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
               >
                 {loading ? (
                   <div className="flex items-center gap-2">
                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    <span>Setting up your account...</span>
+                    <span>Opening your dashboard...</span>
                   </div>
                 ) : (
                   <>
-                    <span>Complete Registration</span>
+                    <span>Create Account & Open Dashboard</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
@@ -482,7 +459,7 @@ function SignupContent() {
               <Link href="/privacy-policy" className="text-slate-600 underline hover:text-[#0b5cff]">
                 Privacy Policy
               </Link>
-              . No credit card required to start.
+              . No credit card required to register.
             </p>
           </div>
         </div>
@@ -539,7 +516,7 @@ export default function SignupPage() {
 
       {/* Footer */}
       <footer className="max-w-6xl mx-auto w-full pt-6 pb-2 border-t border-slate-200/60 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-400">
-        <div>JUMMP Meet • Paid Accounts & Subscriber Services</div>
+        <div>JUMMP Meet • Host & Broadcaster Accounts</div>
         <div className="flex items-center gap-4 text-slate-500">
           <Link href="/terms-conditions" className="hover:text-slate-800">
             Terms
