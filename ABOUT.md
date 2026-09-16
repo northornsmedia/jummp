@@ -24,7 +24,7 @@
   * Real-time in-call chat and animated floating emoji reactions
   * Presenter lock signaling (`SCREEN_SHARE_STARTED`, `SCREEN_SHARE_STOPPED`)
 * **Audio Visualizer & Voice Activity Detection**: Built using the browser `AudioContext` and `AnalyserNode`. Monitors microphone input volume in real-time to drive speaking equalizers and active-speaker glowing rings.
-* **Client-Side HD Recorder**: Utilizes the browser `MediaRecorder` API combined with an `AudioContext` destination mixer. Mixes system display audio with the local microphone track into an encrypted `.webm` recording downloaded directly to the client's device.
+* **Client-Side Ephemeral HD Recorder (Zero DB Storage Policy)**: Free-tier sessions never upload or persist video recordings to the database or cloud storage. Recordings are captured purely in the host's local browser memory buffer. Upon stopping, hosts are prompted with an immediate download alert; once the modal is closed or the call ends, in-memory buffers are wiped permanently and can no longer be retrieved.
 
 ---
 

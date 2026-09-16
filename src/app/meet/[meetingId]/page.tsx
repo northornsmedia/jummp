@@ -117,6 +117,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [recordedUrl, setRecordedUrl] = useState<string | null>(null);
   const [showRecordingModal, setShowRecordingModal] = useState(false);
+  const [hasDownloadedRecording, setHasDownloadedRecording] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
@@ -510,6 +511,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         const url = URL.createObjectURL(blob);
         setRecordedBlob(blob);
         setRecordedUrl(url);
+        setHasDownloadedRecording(false);
         setShowRecordingModal(true);
         setIsRecording(false);
         setIsPausedRecording(false);
@@ -594,6 +596,25 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+    setHasDownloadedRecording(true);
+    showToast('Download Started', 'Recording saved directly to your device storage.', 'info');
+  };
+
+  const handleCloseRecordingModal = () => {
+    if (!hasDownloadedRecording) {
+      const confirmDiscard = window.confirm(
+        'Warning: You have not downloaded this recording yet!\n\nRecordings are NEVER stored in the database or on the server. If you close this window now, this recording will be permanently deleted and will no longer be available.\n\nAre you sure you want to discard it?'
+      );
+      if (!confirmDiscard) return;
+    }
+    setShowRecordingModal(false);
+    if (recordedUrl) {
+      URL.revokeObjectURL(recordedUrl);
+      setRecordedUrl(null);
+    }
+    setRecordedBlob(null);
+    recordingChunksRef.current = [];
+    setHasDownloadedRecording(false);
   };
 
   const formatTimer = (totalSec: number) => {
@@ -4440,13 +4461,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white">Meeting Recording Ready</h3>
-                  <p className="text-xs text-slate-400">Captured locally in your browser</p>
+                  <p className="text-xs text-slate-400">Captured locally in your browser (Zero database storage)</p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setShowRecordingModal(false)}
+                onClick={handleCloseRecordingModal}
                 className="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
+                title="Close"
               >
                 ✕
               </button>
@@ -4458,6 +4480,22 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <video src={recordedUrl} controls className="w-full h-full object-contain" />
               </div>
             )}
+
+            {/* EXPLICIT IMMEDIATE DOWNLOAD WARNING BANNER (FREE TIER / NO DB STORAGE) */}
+            <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start gap-3 shadow-lg">
+              <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div className="space-y-1 text-left">
+                <div className="font-bold text-amber-300 text-xs flex items-center gap-2">
+                  <span>Download it right now</span>
+                  <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                    Not Saved In Database
+                  </span>
+                </div>
+                <div className="text-[11px] text-amber-200/90 leading-relaxed">
+                  Recordings are held <strong>only temporarily in your device&apos;s browser memory</strong>. They are <strong>never stored in the database or on the server</strong>. Once you close this modal, refresh, or leave the meeting, this recording <strong>will be permanently deleted and will no longer be available</strong>.
+                </div>
+              </div>
+            </div>
 
             {/* Metadata Badges */}
             <div className="flex items-center gap-2 text-xs text-slate-400">
@@ -4475,13 +4513,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </div>
 
             {/* Actions */}
-            <div className="flex items-center justify-end gap-2.5 pt-2">
+            <div className="flex items-center justify-between gap-2.5 pt-2">
               <button
                 type="button"
-                onClick={() => setShowRecordingModal(false)}
+                onClick={handleCloseRecordingModal}
                 className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-900 transition-colors"
               >
-                Close
+                {hasDownloadedRecording ? 'Done' : 'Discard / Close'}
               </button>
               <button
                 type="button"
@@ -4489,7 +4527,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 className="px-5 py-2.5 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-xs shadow-lg shadow-blue-500/25 transition-all flex items-center gap-2"
               >
                 <Download className="w-4 h-4" />
-                <span>Download Recording</span>
+                <span>{hasDownloadedRecording ? 'Download Again' : 'Download Right Now'}</span>
               </button>
             </div>
           </div>

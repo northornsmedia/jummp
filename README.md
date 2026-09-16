@@ -30,6 +30,10 @@ NEXT_PUBLIC_LIVEKIT_URL=
 LIVEKIT_API_KEY=
 LIVEKIT_API_SECRET=
 MEETING_TOKEN_SECRET=
+ADMIN_USERNAME=
+ADMIN_PASSWORD=
 ```
 
 `MEETING_TOKEN_SECRET` must be a private random value of at least 24 characters. If it is omitted, the server uses `LIVEKIT_API_SECRET`; setting a separate value is recommended in production. Anonymous meetings do not require a user account: the creator receives a browser-stored host capability, while invite links contain no host credential.
+
+`ADMIN_USERNAME` and `ADMIN_PASSWORD` protect the `/admindesk` telemetry suite with server-side HMAC session authentication. Defaults are `admin` and `jummp@admin2026`.

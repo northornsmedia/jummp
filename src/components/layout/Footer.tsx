@@ -26,10 +26,15 @@ export default function Footer() {
               Scaling the world&apos;s live experiences. The enterprise-grade broadcast platform that doesn&apos;t compromise on quality, pricing, or scale.
             </p>
             <div className="flex items-center gap-3 pt-2">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <Link
+                href="/admindesk"
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition-colors group"
+                title="Open JUMMP AdminDesk Platform Telemetry"
+              >
                 <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                All Systems Operational
-              </span>
+                <span>System Status</span>
+                <span className="text-[10px] text-emerald-600 font-mono">/admindesk</span>
+              </Link>
             </div>
           </div>
 
@@ -69,6 +74,12 @@ export default function Footer() {
           <div className="space-y-3">
             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">Resources & Legal</h4>
             <ul className="space-y-2.5 text-sm">
+              <li>
+                <Link href="/admindesk" className="text-slate-600 hover:text-[#0b5cff] transition-colors flex items-center gap-1.5">
+                  <span>AdminDesk Telemetry</span>
+                  <span className="px-1.5 py-0.2 text-[9px] font-bold rounded bg-blue-100 text-blue-700">LIVE</span>
+                </Link>
+              </li>
               <li>
                 <Link href="/docs" className="text-slate-600 hover:text-[#0b5cff] transition-colors">
                   API & Webhook Docs
