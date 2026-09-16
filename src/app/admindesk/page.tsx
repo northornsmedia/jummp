@@ -36,7 +36,11 @@ import {
   Flame,
   KeyRound,
   ArrowRight,
-  BellRing
+  BellRing,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight
 } from 'lucide-react';
 
 interface ServiceCheck {
@@ -179,6 +183,8 @@ export default function AdminDeskPage() {
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [incomingAlert, setIncomingAlert] = useState<IncomingCallAlert | null>(null);
+  const [meetingPage, setMeetingPage] = useState<number>(1);
+  const MEETING_PAGE_SIZE = 25;
 
   const addLog = useCallback((type: 'info' | 'success' | 'warn' | 'error', text: string) => {
     const newEntry: ConsoleLog = {
@@ -496,6 +502,18 @@ export default function AdminDeskPage() {
       return true;
     });
   }, [data?.recentMeetings, searchQuery, filterStatus, now]);
+
+  // Reset meeting pagination when filtering or searching
+  useEffect(() => {
+    setMeetingPage(1);
+  }, [searchQuery, filterStatus]);
+
+  const totalMeetingPages = Math.max(1, Math.ceil(filteredMeetings.length / MEETING_PAGE_SIZE));
+
+  const paginatedMeetings = useMemo(() => {
+    const startIndex = (meetingPage - 1) * MEETING_PAGE_SIZE;
+    return filteredMeetings.slice(startIndex, startIndex + MEETING_PAGE_SIZE);
+  }, [filteredMeetings, meetingPage]);
 
   // Dynamic Realtime Free Tier Capacity Calculations (Matching Screenshot 1)
   const rawDbMB = Number((((data?.metrics.totalMeetings || 0) * 1200 + (data?.metrics.totalParticipants || 0) * 800 + (data?.metrics.totalMessages || 0) * 500) / (1024 * 1024)).toFixed(2));
@@ -1999,7 +2017,7 @@ export default function AdminDeskPage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredMeetings.map((room) => {
+                      paginatedMeetings.map((room) => {
                         const lastAct = new Date(room.last_activity_at || room.created_at).getTime();
                         const diffMins = Math.floor((now - lastAct) / 60000);
                         const isStale = room.status === 'active' && diffMins > 10;
@@ -2124,6 +2142,84 @@ export default function AdminDeskPage() {
                 </table>
               </div>
             </div>
+
+            {/* Pagination Controls (batch of 25) */}
+            {filteredMeetings.length > 0 && (
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-white/[0.02] border border-white/10 text-xs">
+                <div className="text-slate-400">
+                  Showing <strong className="text-white font-mono">{(meetingPage - 1) * MEETING_PAGE_SIZE + 1}</strong> to{' '}
+                  <strong className="text-white font-mono">
+                    {Math.min(meetingPage * MEETING_PAGE_SIZE, filteredMeetings.length)}
+                  </strong>{' '}
+                  of <strong className="text-white font-mono">{filteredMeetings.length}</strong> meeting rooms
+                  <span className="ml-2 text-slate-500 font-mono text-[11px]">(batch of 25)</span>
+                </div>
+
+                {totalMeetingPages > 1 && (
+                  <div className="flex items-center gap-1.5 self-start sm:self-center">
+                    <button
+                      onClick={() => setMeetingPage(1)}
+                      disabled={meetingPage === 1}
+                      className="p-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                      title="First Page"
+                    >
+                      <ChevronsLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setMeetingPage((p) => Math.max(1, p - 1))}
+                      disabled={meetingPage === 1}
+                      className="px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all flex items-center gap-1 font-medium"
+                      title="Previous Page"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                      <span>Prev</span>
+                    </button>
+
+                    {/* Page Numbers */}
+                    <div className="flex items-center gap-1 px-1">
+                      {Array.from({ length: totalMeetingPages }, (_, i) => i + 1)
+                        .filter((p) => p === 1 || p === totalMeetingPages || Math.abs(p - meetingPage) <= 1)
+                        .map((p, idx, arr) => {
+                          const showEllipsis = idx > 0 && p - arr[idx - 1] > 1;
+                          return (
+                            <React.Fragment key={p}>
+                              {showEllipsis && <span className="px-1 text-slate-500 font-mono">...</span>}
+                              <button
+                                onClick={() => setMeetingPage(p)}
+                                className={`w-7 h-7 rounded-lg text-xs font-semibold font-mono transition-all ${
+                                  meetingPage === p
+                                    ? 'bg-[#0b5cff] text-white shadow-md shadow-blue-500/25'
+                                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                                }`}
+                              >
+                                {p}
+                              </button>
+                            </React.Fragment>
+                          );
+                        })}
+                    </div>
+
+                    <button
+                      onClick={() => setMeetingPage((p) => Math.min(totalMeetingPages, p + 1))}
+                      disabled={meetingPage >= totalMeetingPages}
+                      className="px-2.5 py-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all flex items-center gap-1 font-medium"
+                      title="Next Page"
+                    >
+                      <span>Next</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => setMeetingPage(totalMeetingPages)}
+                      disabled={meetingPage >= totalMeetingPages}
+                      className="p-1.5 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                      title="Last Page"
+                    >
+                      <ChevronsRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

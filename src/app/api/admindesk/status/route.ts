@@ -99,7 +99,7 @@ export async function GET(req: NextRequest) {
         .from('meetings')
         .select('*', { count: 'exact' })
         .order('created_at', { ascending: false })
-        .limit(50);
+        .limit(500);
 
       const sbLatency = Math.round(performance.now() - sbStart);
 
@@ -195,7 +195,7 @@ export async function GET(req: NextRequest) {
           totalMessages: msgCount || 0,
           totalBurnedMinutes: Math.round(totalBurnedMinutes * 10) / 10,
           totalParticipantStreamingMinutes: Math.round(totalParticipantStreamingMinutes * 10) / 10,
-          recentMeetings: enrichedMeetings.slice(0, 50),
+          recentMeetings: enrichedMeetings.slice(0, 500),
         };
 
         checks.push({
