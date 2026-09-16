@@ -45,6 +45,10 @@ import {
   Square,
   Circle,
   X,
+  FileText,
+  Trash2,
+  Edit3,
+  Plus,
 } from 'lucide-react';
 import {
   MeetChannel,
@@ -204,11 +208,36 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [showReactionsPicker, setShowReactionsPicker] = useState(false);
 
   // UI Panels (Mobile bottom sheet or Desktop drawer)
-  const [activePanel, setActivePanel] = useState<'people' | 'chat' | 'info' | null>(null);
+  const [activePanel, setActivePanel] = useState<'people' | 'chat' | 'info' | 'notes' | null>(null);
   const [copied, setCopied] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);
   const [isMinimizedPip, setIsMinimizedPip] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const notesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Live Speech Recognition & Notes State
+  const [meetingNotes, setMeetingNotes] = useState<{
+    id: string;
+    speaker: string;
+    text: string;
+    time: string;
+    timestamp: number;
+    isAutoTranscript?: boolean;
+  }[]>([
+    {
+      id: 'welcome-note',
+      speaker: 'JUMMP AI Notes',
+      text: 'Live meeting notes and speech transcription active. Whichever user speaks, their words will be recognized here in real-time.',
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: Date.now(),
+      isAutoTranscript: true,
+    },
+  ]);
+  const [interimTranscript, setInterimTranscript] = useState<{ speaker: string; text: string } | null>(null);
+  const [activeSpeakers, setActiveSpeakers] = useState<Set<string>>(new Set());
+  const [newCustomNote, setNewCustomNote] = useState('');
+  const recognitionRef = useRef<any>(null);
+  const isSpeakingBroadcastingRef = useRef(false);
   const latestMeetingStateRef = useRef({
     activePanel,
     participants,
@@ -1151,6 +1180,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             if (audioEl) audioEl.remove();
           });
 
+          room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+            const speakingNames = new Set<string>();
+            speakers.forEach((s) => {
+              const sName = (s.name || s.identity || '').trim().toLowerCase();
+              if (sName) speakingNames.add(sName);
+            });
+            setActiveSpeakers(speakingNames);
+          });
+
           await room.connect(data.url, data.token);
 
           // Synchronize any participants already in the room upon connection
@@ -1876,6 +1914,39 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             showToast('Recording Stopped', `${recorderName || 'Host'} stopped recording`, 'info');
           }
         }
+      } else if (msg.type === 'TRANSCRIPT_ENTRY') {
+        if (msg.payload?.speaker && msg.payload?.text) {
+          setMeetingNotes((prev) => {
+            if (prev.some((n) => n.id === msg.payload.id)) return prev;
+            return [...prev, msg.payload];
+          });
+          setInterimTranscript(null);
+          const sName = (msg.payload.speaker || '').trim().toLowerCase();
+          setActiveSpeakers((prev) => new Set(prev).add(sName));
+          setTimeout(() => {
+            setActiveSpeakers((prev) => {
+              const next = new Set(prev);
+              next.delete(sName);
+              return next;
+            });
+          }, 2500);
+        }
+      } else if (msg.type === 'TRANSCRIPT_INTERIM') {
+        if (msg.payload?.speaker && msg.payload?.text) {
+          setInterimTranscript(msg.payload);
+          const sName = (msg.payload.speaker || '').trim().toLowerCase();
+          setActiveSpeakers((prev) => new Set(prev).add(sName));
+        }
+      } else if (msg.type === 'SPEAKER_ACTIVE') {
+        const sName = (msg.payload?.name || '').trim().toLowerCase();
+        if (sName) {
+          setActiveSpeakers((prev) => {
+            const next = new Set(prev);
+            if (msg.payload.isSpeaking) next.add(sName);
+            else next.delete(sName);
+            return next;
+          });
+        }
       } else if (msg.type === 'PEER_RESYNC') {
         // A peer just returned from another app / lock screen
         if (transportMode !== 'livekit' && inCall && msg.payload.name !== userName) {
@@ -2029,6 +2100,181 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     createPeerConnection,
     showToast,
   ]);
+
+  // Real-time Web Speech Recognition & AI Live Notes
+  useEffect(() => {
+    if (!inCall) return;
+
+    const SpeechRecognitionClass =
+      typeof window !== 'undefined' &&
+      ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+
+    if (!SpeechRecognitionClass) return;
+
+    let isStopped = false;
+    let recognition: any = null;
+
+    try {
+      recognition = new SpeechRecognitionClass();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+      recognitionRef.current = recognition;
+
+      recognition.onresult = (event: any) => {
+        const myName = (userName || (isHost ? 'Host' : 'Guest')).trim();
+        let interim = '';
+        let finalStr = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalStr += event.results[i][0].transcript;
+          } else {
+            interim += event.results[i][0].transcript;
+          }
+        }
+
+        const trimmedFinal = finalStr.trim();
+        const trimmedInterim = interim.trim();
+
+        if (trimmedInterim) {
+          setInterimTranscript({ speaker: myName, text: trimmedInterim });
+          setActiveSpeakers((prev) => new Set(prev).add(myName.toLowerCase()));
+          channelRef.current?.send('TRANSCRIPT_INTERIM', {
+            speaker: myName,
+            text: trimmedInterim,
+          });
+        }
+
+        if (trimmedFinal) {
+          setInterimTranscript(null);
+          const newEntry = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            speaker: myName,
+            text: trimmedFinal,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            timestamp: Date.now(),
+            isAutoTranscript: true,
+          };
+
+          setMeetingNotes((prev) => [...prev, newEntry]);
+          channelRef.current?.send('TRANSCRIPT_ENTRY', newEntry);
+
+          setActiveSpeakers((prev) => new Set(prev).add(myName.toLowerCase()));
+          setTimeout(() => {
+            setActiveSpeakers((prev) => {
+              const next = new Set(prev);
+              next.delete(myName.toLowerCase());
+              return next;
+            });
+          }, 2000);
+        }
+      };
+
+      recognition.onerror = () => {};
+
+      recognition.onend = () => {
+        if (!isStopped && inCall && micEnabled) {
+          try {
+            recognition.start();
+          } catch {}
+        }
+      };
+
+      if (micEnabled) {
+        try {
+          recognition.start();
+        } catch {}
+      }
+    } catch {}
+
+    return () => {
+      isStopped = true;
+      try {
+        recognition?.stop();
+      } catch {}
+      recognitionRef.current = null;
+    };
+  }, [inCall, micEnabled, userName, isHost]);
+
+  // Sync active speaker status based on microphone audio volume
+  useEffect(() => {
+    if (!inCall) return;
+    const myName = (userName || (isHost ? 'Host' : 'Guest')).trim().toLowerCase();
+    const isSpeakingNow = micEnabled && audioVolume > 15;
+
+    if (isSpeakingNow && !isSpeakingBroadcastingRef.current) {
+      isSpeakingBroadcastingRef.current = true;
+      setActiveSpeakers((prev) => new Set(prev).add(myName));
+      channelRef.current?.send('SPEAKER_ACTIVE', { name: myName, isSpeaking: true });
+    } else if (!isSpeakingNow && isSpeakingBroadcastingRef.current) {
+      isSpeakingBroadcastingRef.current = false;
+      setActiveSpeakers((prev) => {
+        const next = new Set(prev);
+        next.delete(myName);
+        return next;
+      });
+      channelRef.current?.send('SPEAKER_ACTIVE', { name: myName, isSpeaking: false });
+    }
+  }, [inCall, micEnabled, audioVolume, userName, isHost]);
+
+  const isLocalSpeaking =
+    (micEnabled && audioVolume > 15) ||
+    activeSpeakers.has((userName || (isHost ? 'Host' : 'Guest')).trim().toLowerCase());
+
+  // Auto-scroll Notes to bottom when new note arrives
+  useEffect(() => {
+    if (activePanel === 'notes') {
+      notesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [meetingNotes, interimTranscript, activePanel]);
+
+  // Add Custom / Manual Note
+  const handleAddCustomNote = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newCustomNote.trim()) return;
+
+    const myName = (userName || (isHost ? 'Host' : 'Guest')).trim();
+    const newEntry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      speaker: myName,
+      text: newCustomNote.trim(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: Date.now(),
+      isAutoTranscript: false,
+    };
+
+    setMeetingNotes((prev) => [...prev, newEntry]);
+    channelRef.current?.send('TRANSCRIPT_ENTRY', newEntry);
+    setNewCustomNote('');
+    triggerHaptic('light');
+    showToast('Note Added', 'Note shared with all participants', 'info');
+  };
+
+  // Copy All Notes to Clipboard
+  const copyAllNotes = () => {
+    triggerHaptic('medium');
+    const formatted = meetingNotes
+      .map((n) => `[${n.time}] ${n.speaker}: "${n.text}"`)
+      .join('\n\n');
+    navigator.clipboard.writeText(formatted);
+    showToast('Notes Copied', 'Meeting transcripts copied to clipboard', 'info');
+  };
+
+  // Download Notes as text file
+  const downloadNotes = () => {
+    triggerHaptic('medium');
+    const formatted = `JUMMP Meet - Live Meeting Notes & Transcripts\nMeeting: ${meetingId}\nDate: ${new Date().toLocaleDateString()}\n\n` +
+      meetingNotes.map((n) => `[${n.time}] ${n.speaker}:\n"${n.text}"\n`).join('\n');
+    const blob = new Blob([formatted], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `jummp-notes-${meetingId}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Notes Downloaded', 'Saved meeting notes file', 'info');
+  };
 
   // Toggle Camera
   const toggleCam = async () => {
@@ -3257,7 +3503,29 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </div>
 
         <div className="flex items-center gap-2 text-xs text-slate-400">
-          <span className="font-mono">
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic('light');
+              setActivePanel(activePanel === 'notes' ? null : 'notes');
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all ${
+              activePanel === 'notes'
+                ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/30 ring-2 ring-blue-400/40'
+                : 'bg-slate-800/90 hover:bg-slate-700 border-slate-700 text-slate-200 hover:text-white shadow-sm'
+            }`}
+            title="Open Live Notes & Transcripts"
+          >
+            <FileText className={`w-3.5 h-3.5 ${activePanel === 'notes' ? 'text-white' : 'text-blue-400'}`} />
+            <span>Notes</span>
+            {meetingNotes.length > 1 && (
+              <span className="px-1.5 py-0.2 rounded-full bg-blue-500/25 text-[10px] font-mono font-bold text-blue-300">
+                {meetingNotes.length - 1}
+              </span>
+            )}
+          </button>
+
+          <span className="font-mono ml-1 text-slate-400">
             {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </span>
         </div>
@@ -3726,14 +3994,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   </div>
                 </div>
               ) : otherParticipants.length === 1 ? (
-                /* Case 2: Exactly 2 Participants (1 Remote + 1 Local) - Horizontal Landscape Tiles */
-                <div className="w-full h-full flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 max-w-5xl mx-auto p-2 sm:p-4">
+                /* Case 2: Exactly 2 Participants (1 Remote + 1 Local) - Fullscreen Landscape Stage */
+                <div className="w-full h-full flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-6 w-full max-w-[98vw] 2xl:max-w-[99vw] mx-auto p-1 sm:p-2">
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full aspect-video max-h-[43vh] sm:max-h-[68vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl flex items-center justify-center transition-all duration-300 ${
-                      micEnabled && audioVolume > 15
-                        ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
-                        : 'border-slate-800/80'
+                    className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ${
+                      isLocalSpeaking
+                        ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
+                        : 'border-slate-800/80 shadow-xl'
                     }`}
                   >
                     {camEnabled ? (
@@ -3746,16 +4014,29 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                         className="w-full h-full object-cover transform -scale-x-100"
                       />
                     ) : (
-                      <div className="w-16 h-16 rounded-2xl bg-blue-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                      <div className="w-20 h-20 sm:w-28 sm:h-28 rounded-3xl bg-blue-600 text-white text-2xl sm:text-4xl font-bold flex items-center justify-center shadow-2xl">
                         {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
                       </div>
                     )}
-                    <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-semibold border border-white/10 shadow-md">
+
+                    {/* Top-Left Active Speaking Pill Badge */}
+                    {isLocalSpeaking && (
+                      <div className="absolute top-3 left-3 bg-blue-600/90 backdrop-blur-md text-white px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg border border-blue-400/40 z-20 animate-pulse">
+                        <div className="flex items-end gap-0.5 h-3">
+                          <span className="w-1 bg-white rounded-full animate-voice-bar-1" />
+                          <span className="w-1 bg-white rounded-full animate-voice-bar-2" />
+                          <span className="w-1 bg-white rounded-full animate-voice-bar-3" />
+                        </div>
+                        <span>Speaking</span>
+                      </div>
+                    )}
+
+                    <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-semibold border border-white/10 shadow-md">
                       <span>{userName || 'You'}</span>
                       {!micEnabled ? (
-                        <MicOff className="w-3 h-3 text-red-400" />
-                      ) : audioVolume > 15 ? (
-                        <div className="flex items-end gap-0.5 h-2.5">
+                        <MicOff className="w-3.5 h-3.5 text-red-400" />
+                      ) : isLocalSpeaking ? (
+                        <div className="flex items-end gap-0.5 h-3 ml-0.5">
                           <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
                           <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
                           <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
@@ -3763,7 +4044,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       ) : null}
                     </div>
                     {handRaised && (
-                      <div className="absolute top-2.5 right-2.5 bg-amber-500 text-slate-950 p-1.5 rounded-xl shadow-md animate-bounce">
+                      <div className="absolute top-3 right-3 bg-amber-500 text-slate-950 p-1.5 rounded-xl shadow-md animate-bounce">
                         <Hand className="w-4 h-4" />
                       </div>
                     )}
@@ -3779,11 +4060,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       )?.[1];
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                     const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+                    const isRemoteSpeaking = activeSpeakers.has(participant.name.trim().toLowerCase());
 
                     return (
                       <div
                         key={participant.id}
-                        className="relative w-full aspect-video max-h-[43vh] sm:max-h-[68vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center group"
+                        className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] flex-1 rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-300 ${
+                          isRemoteSpeaking
+                            ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
+                            : 'border-slate-800/80 shadow-xl'
+                        }`}
                       >
                         {remoteStream && !isVideoStopped ? (
                           <video
@@ -3803,13 +4089,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           />
                         ) : (
                           <div className="flex flex-col items-center gap-2">
-                            <div className="w-16 h-16 rounded-2xl bg-indigo-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                            <div className="w-20 h-20 sm:w-28 sm:h-28 rounded-3xl bg-indigo-600 text-white text-2xl sm:text-4xl font-bold flex items-center justify-center shadow-2xl">
                               {participant.name.slice(0, 2).toUpperCase()}
                             </div>
-                            <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                            <div className="flex items-center gap-1.5 text-xs text-slate-400">
                               {isVideoStopped ? (
                                 <>
-                                  <VideoOff className="w-3.5 h-3.5 text-amber-400" />
+                                  <VideoOff className="w-4 h-4 text-amber-400" />
                                   <span className="text-amber-300/80">Camera off</span>
                                 </>
                               ) : (
@@ -3822,16 +4108,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           </div>
                         )}
 
+                        {/* Top-Left Active Speaking Pill Badge */}
+                        {isRemoteSpeaking && (
+                          <div className={`absolute ${participant.handRaised ? 'top-12' : 'top-3'} left-3 bg-blue-600/90 backdrop-blur-md text-white px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg border border-blue-400/40 z-20 animate-pulse`}>
+                            <div className="flex items-end gap-0.5 h-3">
+                              <span className="w-1 bg-white rounded-full animate-voice-bar-1" />
+                              <span className="w-1 bg-white rounded-full animate-voice-bar-2" />
+                              <span className="w-1 bg-white rounded-full animate-voice-bar-3" />
+                            </div>
+                            <span>Speaking</span>
+                          </div>
+                        )}
+
                         {/* Top-Left Hand Raised Overlay */}
                         {participant.handRaised && (
-                          <div className="absolute top-2.5 left-2.5 bg-amber-500 text-slate-950 px-2.5 py-1.5 rounded-xl shadow-lg animate-bounce z-10 flex items-center gap-1.5 font-bold text-xs border border-amber-400/50">
+                          <div className="absolute top-3 left-3 bg-amber-500 text-slate-950 px-2.5 py-1.5 rounded-xl shadow-lg animate-bounce z-10 flex items-center gap-1.5 font-bold text-xs border border-amber-400/50">
                             <Hand className="w-4 h-4" />
                             <span>Hand raised</span>
                           </div>
                         )}
 
                         {/* Top-Right Quick Action Overlays */}
-                        <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-10 bg-slate-950/80 backdrop-blur-md p-1 rounded-xl border border-white/10 shadow-lg opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                        <div className="absolute top-3 right-3 flex items-center gap-1.5 z-10 bg-slate-950/80 backdrop-blur-md p-1.5 rounded-xl border border-white/10 shadow-lg opacity-90 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                           <button
                             type="button"
                             onClick={() => handleMuteParticipantAudio(participant.name)}
@@ -3858,19 +4156,26 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           </button>
                         </div>
 
-                        <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
+                        <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-medium border border-white/10 shadow-md">
                           <span>{participant.name}</span>
                           {participant.isHost && (
                             <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
                           )}
+                          {isRemoteSpeaking && !isAudioMuted && (
+                            <div className="flex items-end gap-0.5 h-3 ml-0.5">
+                              <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
+                              <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
+                              <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                            </div>
+                          )}
                           {isAudioMuted && (
                             <span className="p-0.5 rounded bg-red-500/20 text-red-400" title="Microphone muted">
-                              <MicOff className="w-3 h-3" />
+                              <MicOff className="w-3.5 h-3.5" />
                             </span>
                           )}
                           {isVideoStopped && (
                             <span className="p-0.5 rounded bg-amber-500/20 text-amber-400" title="Camera off">
-                              <VideoOff className="w-3 h-3" />
+                              <VideoOff className="w-3.5 h-3.5" />
                             </span>
                           )}
                         </div>
@@ -3880,13 +4185,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 </div>
               ) : (
                 /* Case 3: 3+ Participants - Responsive Landscape Grid */
-                <div className="w-full h-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 max-w-6xl mx-auto items-center justify-center overflow-y-auto p-2 sm:p-4">
+                <div className="w-full h-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 w-full max-w-[98vw] 2xl:max-w-[99vw] mx-auto items-center justify-center overflow-y-auto p-1 sm:p-2">
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full aspect-video max-h-[38vh] sm:max-h-[44vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl flex items-center justify-center transition-all duration-300 ${
-                      micEnabled && audioVolume > 15
-                        ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
-                        : 'border-slate-800/80'
+                    className={`relative w-full aspect-video max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ${
+                      isLocalSpeaking
+                        ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
+                        : 'border-slate-800/80 shadow-xl'
                     }`}
                   >
                     {camEnabled ? (
@@ -3903,11 +4208,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                         {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
                       </div>
                     )}
+
+                    {/* Top-Left Active Speaking Pill Badge */}
+                    {isLocalSpeaking && (
+                      <div className="absolute top-2.5 left-2.5 bg-blue-600/90 backdrop-blur-md text-white px-2.5 py-1 rounded-xl text-[11px] font-bold flex items-center gap-1.5 shadow-lg border border-blue-400/40 z-20 animate-pulse">
+                        <div className="flex items-end gap-0.5 h-2.5">
+                          <span className="w-1 bg-white rounded-full animate-voice-bar-1" />
+                          <span className="w-1 bg-white rounded-full animate-voice-bar-2" />
+                          <span className="w-1 bg-white rounded-full animate-voice-bar-3" />
+                        </div>
+                        <span>Speaking</span>
+                      </div>
+                    )}
+
                     <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-semibold border border-white/10 shadow-md">
                       <span>{userName || 'You'}</span>
                       {!micEnabled ? (
                         <MicOff className="w-3 h-3 text-red-400" />
-                      ) : audioVolume > 15 ? (
+                      ) : isLocalSpeaking ? (
                         <div className="flex items-end gap-0.5 h-2.5">
                           <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
                           <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
@@ -3932,11 +4250,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       )?.[1];
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
                     const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+                    const isRemoteSpeaking = activeSpeakers.has(participant.name.trim().toLowerCase());
 
                     return (
                       <div
                         key={participant.id}
-                        className="relative w-full aspect-video max-h-[38vh] sm:max-h-[44vh] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-xl flex items-center justify-center group"
+                        className={`relative w-full aspect-video max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-300 ${
+                          isRemoteSpeaking
+                            ? 'border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950'
+                            : 'border-slate-800/80 shadow-xl'
+                        }`}
                       >
                         {remoteStream && !isVideoStopped ? (
                           <video
@@ -3972,6 +4295,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                                 </>
                               )}
                             </div>
+                          </div>
+                        )}
+
+                        {/* Top-Left Active Speaking Pill Badge */}
+                        {isRemoteSpeaking && (
+                          <div className={`absolute ${participant.handRaised ? 'top-10' : 'top-2.5'} left-2.5 bg-blue-600/90 backdrop-blur-md text-white px-2.5 py-1 rounded-xl text-[11px] font-bold flex items-center gap-1.5 shadow-lg border border-blue-400/40 z-20 animate-pulse`}>
+                            <div className="flex items-end gap-0.5 h-2.5">
+                              <span className="w-1 bg-white rounded-full animate-voice-bar-1" />
+                              <span className="w-1 bg-white rounded-full animate-voice-bar-2" />
+                              <span className="w-1 bg-white rounded-full animate-voice-bar-3" />
+                            </div>
+                            <span>Speaking</span>
                           </div>
                         )}
 
@@ -4015,6 +4350,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           <span>{participant.name}</span>
                           {participant.isHost && (
                             <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
+                          )}
+                          {isRemoteSpeaking && !isAudioMuted && (
+                            <div className="flex items-end gap-0.5 h-2.5 ml-0.5">
+                              <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
+                              <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
+                              <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                            </div>
                           )}
                           {isAudioMuted && (
                             <span className="p-0.5 rounded bg-red-500/20 text-red-400" title="Microphone muted">
@@ -4117,6 +4459,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 font-mono">
                       {1 + otherParticipants.length}
                     </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic('light');
+                      setActivePanel('notes');
+                    }}
+                    className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
+                      activePanel === 'notes'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                    }`}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Notes</span>
+                    {meetingNotes.length > 1 && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 font-mono">
+                        {meetingNotes.length - 1}
+                      </span>
+                    )}
                   </button>
 
                   <button
@@ -4474,6 +4837,162 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   </div>
                 </div>
               )}
+
+              {/* NOTES TAB */}
+              {activePanel === 'notes' && (
+                <div className="flex flex-col h-full space-y-3">
+                  {/* Notes Header Bar with Actions */}
+                  <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <div className="p-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400">
+                        <FileText className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-xs text-white">Live Meeting Notes</h4>
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>AI Speech Recognition Active</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={copyAllNotes}
+                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+                        title="Copy all notes to clipboard"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={downloadNotes}
+                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+                        title="Download notes as text file"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (window.confirm('Clear all meeting transcripts and notes?')) {
+                            setMeetingNotes([]);
+                            setInterimTranscript(null);
+                          }
+                        }}
+                        className="p-1.5 rounded-lg bg-slate-800 hover:bg-red-900/50 text-slate-400 hover:text-red-300 transition-colors"
+                        title="Clear notes"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Transcripts Stream */}
+                  <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 max-h-[calc(100vh-300px)] sm:max-h-[50vh]">
+                    {meetingNotes.length === 0 && !interimTranscript ? (
+                      <div className="text-center py-8 text-slate-500 space-y-2">
+                        <FileText className="w-8 h-8 mx-auto opacity-40 text-blue-400" />
+                        <p className="text-xs">No notes yet. Start speaking into your mic to see live transcripts.</p>
+                      </div>
+                    ) : (
+                      meetingNotes.map((note) => {
+                        const isMe =
+                          note.speaker.trim().toLowerCase() ===
+                          (userName || (isHost ? 'Host' : 'Guest')).trim().toLowerCase();
+
+                        return (
+                          <div
+                            key={note.id}
+                            className="bg-slate-900/90 rounded-2xl p-3 border border-slate-800/80 hover:border-slate-700/80 transition-all shadow-sm"
+                          >
+                            <div className="flex items-center justify-between mb-1.5">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`w-2 h-2 rounded-full ${
+                                    isMe ? 'bg-blue-400 shadow-xs shadow-blue-400/50' : 'bg-indigo-400 shadow-xs shadow-indigo-400/50'
+                                  }`}
+                                />
+                                <span
+                                  className={`font-bold text-xs ${
+                                    isMe ? 'text-blue-300' : 'text-indigo-300'
+                                  }`}
+                                >
+                                  {note.speaker}
+                                </span>
+                                {note.isAutoTranscript && (
+                                  <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-400 border border-slate-700/50">
+                                    Spoken
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-[10px] text-slate-500 font-mono">{note.time}</span>
+                            </div>
+                            <div className="text-xs text-slate-200 leading-relaxed font-sans pl-3 border-l-2 border-slate-700/70 break-words">
+                              <span className="font-bold text-slate-300">{note.speaker} : </span>
+                              <span className="text-slate-100">&ldquo;{note.text}&rdquo;</span>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+
+                    {/* LIVE INTERIM TRANSCRIPT (Active speaker speaking right now) */}
+                    {interimTranscript && (
+                      <div className="bg-blue-950/40 rounded-2xl p-3 border border-blue-500/50 animate-pulse shadow-md">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-end gap-0.5 h-3">
+                              <span className="w-1 bg-blue-400 rounded-full animate-voice-bar-1" />
+                              <span className="w-1 bg-blue-400 rounded-full animate-voice-bar-2" />
+                              <span className="w-1 bg-blue-400 rounded-full animate-voice-bar-3" />
+                            </div>
+                            <span className="font-bold text-xs text-blue-300">
+                              {interimTranscript.speaker} (Speaking...)
+                            </span>
+                          </div>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-blue-500/25 text-blue-300 font-semibold uppercase tracking-wider">
+                            Live
+                          </span>
+                        </div>
+                        <div className="text-xs text-blue-100 italic leading-relaxed pl-3 border-l-2 border-blue-400/80 break-words">
+                          <span className="font-bold text-blue-300">{interimTranscript.speaker} : </span>
+                          <span>&ldquo;{interimTranscript.text}&rdquo;</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div ref={notesEndRef} />
+                  </div>
+
+                  {/* Manual Note Add Input */}
+                  <form
+                    onSubmit={handleAddCustomNote}
+                    className="pt-2 border-t border-slate-800 flex gap-2 items-center"
+                  >
+                    <input
+                      type="text"
+                      value={newCustomNote}
+                      onChange={(e) => setNewCustomNote(e.target.value)}
+                      placeholder="Add a custom note or summary..."
+                      className="flex-1 bg-slate-900 border border-slate-800 focus:border-blue-500/80 focus:ring-1 focus:ring-blue-500/30 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 outline-none transition-all"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!newCustomNote.trim()}
+                      className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                        newCustomNote.trim()
+                          ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-500/25 active:scale-95'
+                          : 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-60'
+                      }`}
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add</span>
+                    </button>
+                  </form>
+                </div>
+              )}
             </div>
           </aside>
         </>
@@ -4705,6 +5224,31 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </button>
             <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
               In-call chat
+            </span>
+          </div>
+
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => {
+                triggerHaptic('light');
+                setActivePanel(activePanel === 'notes' ? null : 'notes');
+              }}
+              className={`p-2.5 rounded-xl transition-colors relative ${
+                activePanel === 'notes'
+                  ? 'bg-blue-600 text-white'
+                  : 'hover:bg-slate-800 text-slate-400 hover:text-white'
+              }`}
+            >
+              <FileText className="w-5 h-5" />
+              {meetingNotes.length > 1 && (
+                <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-blue-500 text-[9px] font-bold flex items-center justify-center text-white font-mono">
+                  {meetingNotes.length - 1 > 9 ? '9+' : meetingNotes.length - 1}
+                </span>
+              )}
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              Live Notes & Transcripts
             </span>
           </div>
         </div>
