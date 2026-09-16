@@ -49,7 +49,10 @@ import {
   Trash2,
   Edit3,
   Plus,
+  QrCode,
+  Share2,
 } from 'lucide-react';
+import QRCode from 'qrcode';
 import {
   MeetChannel,
   Participant,
@@ -240,7 +243,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // UI Panels (Mobile bottom sheet or Desktop drawer)
   const [activePanel, setActivePanel] = useState<'people' | 'chat' | 'info' | 'notes' | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
+  const [showInfoQr, setShowInfoQr] = useState(true);
+  const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [unreadChat, setUnreadChat] = useState(false);
+
+  // Generate QR Code data URL whenever meetingId changes
+  useEffect(() => {
+    if (!meetingId) return;
+    const fullUrl = getMeetingUrl(meetingId);
+    QRCode.toDataURL(fullUrl, {
+      width: 480,
+      margin: 2,
+      color: {
+        dark: '#0f172a',
+        light: '#ffffff',
+      },
+      errorCorrectionLevel: 'M',
+    })
+      .then((url) => setQrDataUrl(url))
+      .catch((err) => console.error('Failed to generate QR data URL:', err));
+  }, [meetingId]);
   const [isMinimizedPip, setIsMinimizedPip] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const notesEndRef = useRef<HTMLDivElement | null>(null);
@@ -3139,6 +3162,189 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Download QR Code as a high-resolution .jpg image
+  const downloadQrJpg = async () => {
+    try {
+      triggerHaptic('medium');
+      const fullUrl = getMeetingUrl(meetingId);
+
+      const canvas = document.createElement('canvas');
+      const width = 1000;
+      const height = 1180;
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Solid White background (essential for JPEG)
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, width, height);
+
+      // Top decorative blue-cyan accent gradient
+      const gradient = ctx.createLinearGradient(0, 0, width, 0);
+      gradient.addColorStop(0, '#0b5cff');
+      gradient.addColorStop(1, '#06b6d4');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, width, 20);
+
+      // Brand Title
+      ctx.fillStyle = '#0b5cff';
+      ctx.font = 'bold 44px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('JUMMP MEET', width / 2, 95);
+
+      // Subtitle
+      ctx.fillStyle = '#475569';
+      ctx.font = '600 22px sans-serif';
+      ctx.fillText('Scan with your phone camera to join', width / 2, 140);
+
+      // Meeting Room ID box
+      const pillW = 600;
+      const pillH = 64;
+      const pillX = (width - pillW) / 2;
+      const pillY = 175;
+      ctx.fillStyle = '#f1f5f9';
+      if (typeof (ctx as any).roundRect === 'function') {
+        (ctx as any).roundRect(pillX, pillY, pillW, pillH, 16);
+      } else {
+        ctx.rect(pillX, pillY, pillW, pillH);
+      }
+      ctx.fill();
+
+      ctx.fillStyle = '#1e293b';
+      ctx.font = 'bold 24px monospace, sans-serif';
+      ctx.fillText(`Meeting ID: ${meetingId}`, width / 2, pillY + 41);
+
+      // Render high-res QR code onto an offscreen canvas
+      const qrCanvas = document.createElement('canvas');
+      await QRCode.toCanvas(qrCanvas, fullUrl, {
+        width: 640,
+        margin: 1,
+        color: {
+          dark: '#0f172a',
+          light: '#ffffff',
+        },
+        errorCorrectionLevel: 'H',
+      });
+
+      // Draw QR code with a subtle border
+      const qrSize = 640;
+      const qrX = (width - qrSize) / 2;
+      const qrY = 275;
+
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(qrX - 8, qrY - 8, qrSize + 16, qrSize + 16);
+      ctx.drawImage(qrCanvas, qrX, qrY, qrSize, qrSize);
+
+      // Link text & metadata
+      ctx.fillStyle = '#64748b';
+      ctx.font = '18px monospace, sans-serif';
+      ctx.fillText(fullUrl, width / 2, 970);
+
+      // Divider line
+      ctx.strokeStyle = '#f1f5f9';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(120, 1020);
+      ctx.lineTo(width - 120, 1020);
+      ctx.stroke();
+
+      // Footer
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '16px sans-serif';
+      ctx.fillText('Encrypted HD Video & AI Transcripts • JUMMP', width / 2, 1065);
+
+      // Export specifically as JPEG (.jpg)
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `jummp-qr-${meetingId}.jpg`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast('QR Code Downloaded', 'Saved meeting QR code as .jpg', 'info');
+      }, 'image/jpeg', 0.95);
+    } catch (err) {
+      console.error('Error generating QR JPG:', err);
+      showToast('Download Failed', 'Could not generate QR code image', 'info');
+    }
+  };
+
+  // Share Meeting link or QR code
+  const shareMeetingQr = async () => {
+    try {
+      triggerHaptic('medium');
+      const fullUrl = getMeetingUrl(meetingId);
+
+      if (typeof navigator !== 'undefined' && navigator.share) {
+        try {
+          // Attempt to share JPG file if device supports file sharing
+          const canvas = document.createElement('canvas');
+          const width = 800;
+          const height = 960;
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, width, height);
+            const qrCanvas = document.createElement('canvas');
+            await QRCode.toCanvas(qrCanvas, fullUrl, { width: 500, margin: 1 });
+            ctx.drawImage(qrCanvas, 150, 200, 500, 500);
+            ctx.fillStyle = '#0b5cff';
+            ctx.font = 'bold 36px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('JUMMP MEET', width / 2, 80);
+            ctx.fillStyle = '#334155';
+            ctx.font = '20px sans-serif';
+            ctx.fillText(`Room: ${meetingId}`, width / 2, 130);
+            ctx.fillText(fullUrl, width / 2, 760);
+          }
+
+          const blob = await new Promise<Blob | null>((res) =>
+            canvas.toBlob((b) => res(b), 'image/jpeg', 0.92)
+          );
+
+          if (
+            blob &&
+            navigator.canShare &&
+            navigator.canShare({
+              files: [new File([blob], `jummp-qr-${meetingId}.jpg`, { type: 'image/jpeg' })],
+            })
+          ) {
+            const file = new File([blob], `jummp-qr-${meetingId}.jpg`, { type: 'image/jpeg' });
+            await navigator.share({
+              title: `Join JUMMP Meeting: ${meetingId}`,
+              text: `Join my JUMMP video meeting room: ${fullUrl}`,
+              files: [file],
+            });
+            return;
+          }
+        } catch {
+          // Fall back to link sharing
+        }
+
+        await navigator.share({
+          title: `Join JUMMP Meeting: ${meetingId}`,
+          text: `Join my JUMMP video meeting room (${meetingId}):`,
+          url: fullUrl,
+        });
+        showToast('Link Shared', 'Meeting invitation sent', 'info');
+      } else {
+        copyMeetingLink();
+        showToast('Link Copied', 'Meeting link copied to clipboard', 'info');
+      }
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.log('Share error:', err);
+      }
+    }
+  };
+
   // Leave Call
   const handleLeaveCall = () => {
     triggerHaptic('heavy');
@@ -3653,14 +3859,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     <span>{isHost ? 'Join now' : 'Ask to join'}</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={copyMeetingLink}
-                    className="w-full py-3 px-4 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs transition-colors flex items-center justify-center gap-2"
-                  >
-                    {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                    <span>{copied ? 'Link copied to clipboard!' : 'Copy meeting link'}</span>
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={copyMeetingLink}
+                      className="w-full py-3 px-3 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                      <span>{copied ? 'Copied!' : 'Copy link'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowQrModal(true)}
+                      className="w-full py-3 px-3 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold text-xs transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <QrCode className="w-4 h-4 text-blue-400" />
+                      <span>Show QR</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -3713,6 +3929,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           >
             <span>{meetingId}</span>
             {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-slate-500" />}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              triggerHaptic('light');
+              setShowQrModal(true);
+            }}
+            className="flex items-center gap-1 px-2 py-1 rounded-xl bg-slate-800/80 hover:bg-blue-600/20 hover:text-blue-400 text-xs text-slate-400 transition-colors"
+            title="Show QR Code"
+          >
+            <QrCode className="w-3.5 h-3.5" />
+            <span className="hidden md:inline text-[10px] font-medium">QR</span>
           </button>
           {isHost && (
             <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30">
@@ -4247,6 +4475,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       >
                         {copied ? <Check className="w-3 h-3 text-emerald-300" /> : <Copy className="w-3 h-3" />}
                         <span>{copied ? 'Copied' : 'Invite'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowQrModal(true)}
+                        className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px] flex items-center gap-1 transition-colors border border-white/10"
+                        title="Show QR Code"
+                      >
+                        <QrCode className="w-3 h-3 text-blue-400" />
+                        <span>QR</span>
                       </button>
                     </div>
 
@@ -5099,19 +5336,94 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="space-y-4">
                   <div>
                     <h4 className="font-bold text-sm text-white mb-1">Meeting Details</h4>
-                    <p className="text-slate-400">Share this link to invite others to join this room.</p>
+                    <p className="text-slate-400 text-xs">Share this link or QR code to invite others to join.</p>
                   </div>
+
                   <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 font-mono text-[11px] break-all text-blue-300 select-all shadow-inner">
                     {getMeetingUrl(meetingId)}
                   </div>
-                  <button
-                    type="button"
-                    onClick={copyMeetingLink}
-                    className="w-full py-3.5 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-blue-500/25 transition-all"
-                  >
-                    {copied ? <Check className="w-4 h-4 text-emerald-300" /> : <Copy className="w-4 h-4" />}
-                    <span>{copied ? 'Copied to clipboard' : 'Copy joining info'}</span>
-                  </button>
+
+                  {/* Share & Copy Buttons */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={copyMeetingLink}
+                      className="py-2.5 px-3 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/25 transition-all"
+                    >
+                      {copied ? <Check className="w-4 h-4 text-emerald-300" /> : <Copy className="w-4 h-4" />}
+                      <span>{copied ? 'Copied' : 'Copy link'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={shareMeetingQr}
+                      className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-98 text-slate-200 font-bold text-xs flex items-center justify-center gap-1.5 border border-slate-700 transition-all"
+                      title="Share meeting invitation"
+                    >
+                      <Share2 className="w-4 h-4 text-blue-400" />
+                      <span>Share</span>
+                    </button>
+                  </div>
+
+                  {/* QR Code Section with Show/Hide and Download JPG */}
+                  <div className="p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                          <QrCode className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h5 className="font-semibold text-xs text-white">Meeting QR Code</h5>
+                          <p className="text-[10px] text-slate-400">Scan on phone to join call</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowInfoQr(!showInfoQr)}
+                        className="text-[11px] font-semibold text-blue-400 hover:text-blue-300 transition-colors px-2 py-1 rounded-lg hover:bg-slate-800"
+                      >
+                        {showInfoQr ? 'Hide QR' : 'Show QR'}
+                      </button>
+                    </div>
+
+                    {showInfoQr && (
+                      <div className="space-y-3 pt-1 animate-in fade-in duration-150">
+                        <div className="flex justify-center p-3 rounded-xl bg-white shadow-inner">
+                          {qrDataUrl ? (
+                            <img
+                              src={qrDataUrl}
+                              alt={`QR Code for ${meetingId}`}
+                              className="w-44 h-44 object-contain rounded"
+                            />
+                          ) : (
+                            <div className="w-44 h-44 flex items-center justify-center text-slate-600 text-xs font-mono">
+                              Generating QR...
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={downloadQrJpg}
+                            className="w-full py-2 px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-semibold text-xs flex items-center justify-center gap-1.5 border border-slate-700 hover:border-slate-600 transition-all"
+                            title="Download QR code in .jpg format"
+                          >
+                            <Download className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Download .JPG</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={shareMeetingQr}
+                            className="w-full py-2 px-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-semibold text-xs flex items-center justify-center gap-1.5 border border-slate-700 hover:border-slate-600 transition-all"
+                            title="Share QR code"
+                          >
+                            <Share2 className="w-3.5 h-3.5 text-blue-400" />
+                            <span>Share QR</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
 
                   <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 flex items-center gap-2.5 text-slate-400 text-[11px]">
                     <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -5616,6 +5928,92 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <span>{hasDownloadedRecording ? 'Download Again' : 'Download Right Now'}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* FULL-SCREEN GLASSMORPHIC QR CODE DIALOG */}
+      {showQrModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-150"
+          onClick={() => setShowQrModal(false)}
+        >
+          <div
+            className="relative w-full max-w-sm rounded-3xl bg-slate-950/95 border border-slate-800 shadow-2xl p-6 text-center space-y-4 animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Close button */}
+            <button
+              type="button"
+              onClick={() => setShowQrModal(false)}
+              className="absolute top-4 right-4 p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+              title="Close QR modal"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center justify-center gap-2 text-blue-400 pt-1">
+              <div className="p-2 rounded-xl bg-blue-500/10 border border-blue-500/20">
+                <QrCode className="w-5 h-5" />
+              </div>
+              <h3 className="text-lg font-bold text-white">Meeting QR Code</h3>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              Scan with your phone&apos;s camera to join this room instantly.
+            </p>
+
+            {/* QR Card */}
+            <div className="p-4 rounded-2xl bg-white shadow-xl flex items-center justify-center mx-auto w-fit">
+              {qrDataUrl ? (
+                <img
+                  src={qrDataUrl}
+                  alt={`QR for ${meetingId}`}
+                  className="w-56 h-56 object-contain"
+                />
+              ) : (
+                <div className="w-56 h-56 flex items-center justify-center text-slate-600 text-sm font-medium">
+                  Generating QR code...
+                </div>
+              )}
+            </div>
+
+            {/* Meeting Link Badge */}
+            <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 font-mono text-xs text-blue-300 break-all select-all">
+              {getMeetingUrl(meetingId)}
+            </div>
+
+            {/* Action buttons */}
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={downloadQrJpg}
+                className="py-3 px-3 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-blue-500/25 transition-all"
+                title="Download QR in .jpg format"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download .JPG</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={shareMeetingQr}
+                className="py-3 px-3 rounded-2xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-200 font-bold text-xs flex items-center justify-center gap-2 border border-slate-700 transition-all"
+                title="Share QR Code"
+              >
+                <Share2 className="w-4 h-4 text-blue-400" />
+                <span>Share QR</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={copyMeetingLink}
+              className="w-full py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 text-xs font-semibold flex items-center justify-center gap-1.5 border border-slate-800/80 transition-colors"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copied ? 'Link Copied!' : 'Copy Meeting Link'}</span>
+            </button>
           </div>
         </div>
       )}
