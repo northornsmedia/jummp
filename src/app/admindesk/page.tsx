@@ -1570,251 +1570,159 @@ export default function AdminDeskPage() {
               </div>
             </div>
 
-            {/* 2. OFFICIAL JUMMP COMMERCIAL PLANS (PICTURE-PERFECT FROM SCREENSHOT 2 & WEBSITE) */}
+            {/* 2. OFFICIAL JUMMP COMMERCIAL PLANS (MATCHING WEBSITE PLANS) */}
             <div className="pt-8 border-t border-white/10 space-y-6">
-              {/* Header and 2-column showcase */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                {/* Left side: Scale your events with zero seat caps */}
-                <div className="lg:col-span-7 space-y-6">
+              {/* Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-500/10 text-[#0b5cff] border border-blue-400/20 mb-2">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    UNLIMITED WEBINAR BROADCASTING
+                  </div>
+                  <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                    Scale your events with <span className="text-[#0b5cff]">zero seat caps</span>.
+                  </h2>
+                  <p className="text-xs sm:text-sm text-slate-400 max-w-2xl mt-1">
+                    Stream to 50 or 500,000 attendees with flat pricing, ultra-low latency WebRTC, and zero required downloads for participants.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 self-start sm:self-center">
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    Active: Free Community Tier
+                  </span>
+                  <Link
+                    href="/pricing"
+                    target="_blank"
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 text-xs font-medium transition-all"
+                  >
+                    <span>View /pricing</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </Link>
+                </div>
+              </div>
+
+              {/* Plan Selector Buttons */}
+              <div className="inline-flex items-center p-1.5 rounded-2xl bg-white/5 border border-white/10 gap-1.5">
+                {(['starter', 'pro', 'enterprise'] as const).map((planKey) => {
+                  const isSelected = selectedPlanTab === planKey;
+                  return (
+                    <button
+                      key={planKey}
+                      onClick={() => setSelectedPlanTab(planKey)}
+                      className={`px-6 py-2.5 rounded-xl text-xs font-bold capitalize transition-all flex items-center gap-2 ${
+                        isSelected
+                          ? 'bg-[#0b5cff] text-white shadow-lg shadow-blue-500/25'
+                          : 'text-slate-400 hover:text-white hover:bg-white/5'
+                      }`}
+                    >
+                      <span>{planKey === 'pro' ? 'Pro' : planKey === 'starter' ? 'Starter' : 'Enterprise'}</span>
+                      {planKey === 'pro' && (
+                        <span className={`text-[10px] uppercase font-extrabold px-1.5 py-0.5 rounded ${
+                          isSelected ? 'bg-amber-400 text-slate-900' : 'bg-amber-400/20 text-amber-300'
+                        }`}>
+                          HOT
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Selected Plan Details Showcase (Full-Width Clean Dashboard Card) */}
+              <div className="p-6 sm:p-8 rounded-3xl bg-white/[0.03] border border-white/10 backdrop-blur-xl shadow-2xl relative overflow-hidden">
+                <div className="flex flex-col md:flex-row md:items-start justify-between gap-6">
                   <div>
-                    <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-500/10 text-[#0b5cff] border border-blue-400/20 mb-3">
-                      <Sparkles className="w-3.5 h-3.5" />
-                      UNLIMITED WEBINAR BROADCASTING
-                    </div>
-                    <h2 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold text-white tracking-tight leading-tight">
-                      Scale your events with<br />zero seat caps.
-                    </h2>
-                    <p className="text-sm sm:text-base text-slate-400 max-w-xl mt-3 leading-relaxed">
-                      Stream to 50 or 500,000 attendees with flat pricing, ultra-low latency WebRTC, and zero required downloads for participants.
-                    </p>
-                  </div>
-
-                  {/* Plan Selector Buttons */}
-                  <div className="inline-flex items-center p-1.5 rounded-2xl bg-white/5 border border-white/10 gap-1.5">
-                    {(['starter', 'pro', 'enterprise'] as const).map((planKey) => {
-                      const isSelected = selectedPlanTab === planKey;
-                      return (
-                        <button
-                          key={planKey}
-                          onClick={() => setSelectedPlanTab(planKey)}
-                          className={`px-6 py-2.5 rounded-xl text-xs font-bold capitalize transition-all flex items-center gap-2 ${
-                            isSelected
-                              ? 'bg-[#0b5cff] text-white shadow-lg shadow-blue-500/25'
-                              : 'text-slate-400 hover:text-white hover:bg-white/5'
-                          }`}
-                        >
-                          <span>{planKey === 'pro' ? 'Pro' : planKey === 'starter' ? 'Starter' : 'Enterprise'}</span>
-                          {planKey === 'pro' && (
-                            <span className={`text-[10px] uppercase font-extrabold px-1.5 py-0.5 rounded ${
-                              isSelected ? 'bg-amber-400 text-slate-900' : 'bg-amber-400/20 text-amber-300'
-                            }`}>
-                              HOT
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {/* Selected Plan Details Card (Matching Screenshot 2 Left Card) */}
-                  <div className="p-6 sm:p-7 rounded-3xl bg-white/[0.03] border border-white/10 backdrop-blur-xl shadow-2xl relative overflow-hidden">
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                          SELECTED PLAN
-                        </span>
-                        <h3 className="text-xl sm:text-2xl font-bold text-white mt-1 capitalize">
-                          {selectedPlanTab} Plan
-                        </h3>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-2xl sm:text-3xl font-extrabold text-[#0b5cff]">
-                          {selectedPlanTab === 'starter' ? '₹999' : selectedPlanTab === 'pro' ? '₹1,999' : 'Custom'}
-                        </span>
-                        <span className="text-xs text-slate-400 font-medium">/month</span>
-                      </div>
-                    </div>
-
-                    <p className="text-xs sm:text-sm italic text-slate-300 mt-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#0b5cff]">
+                      SELECTED PLAN SPECIFICATION
+                    </span>
+                    <h3 className="text-2xl sm:text-3xl font-bold text-white mt-1 capitalize">
+                      {selectedPlanTab} Plan
+                    </h3>
+                    <p className="text-xs sm:text-sm italic text-slate-300 mt-1 max-w-xl">
                       {selectedPlanTab === 'starter'
                         ? 'Perfect for solo creators & small interactive workshops.'
                         : selectedPlanTab === 'pro'
-                        ? 'For growing businesses running frequent, high-impact webinars.'
-                        : 'Dedicated infrastructure, custom SLAs & white-label branding.'}
+                        ? 'For growing businesses running frequent, high-impact webinars with timed offers & ticket sales.'
+                        : 'Dedicated infrastructure, custom SLAs & white-label branding for global enterprises.'}
                     </p>
+                  </div>
 
-                    <div className="space-y-2.5 pt-4">
-                      {(selectedPlanTab === 'starter'
-                        ? [
-                            'Unlimited attendees per session',
-                            '1 active concurrent room',
-                            '1080p Full HD streaming',
-                            'Live chat, Q&A & polls',
-                          ]
-                        : selectedPlanTab === 'pro'
-                        ? [
-                            'Unlimited attendees (no seat caps)',
-                            'Unlimited concurrent webinar rooms',
-                            '1080p 60fps & 4K ultra-low latency',
-                            'Timed offer cards & ticket sales',
-                            'Real-time attendance & retention curves',
-                            'Cloud recording & browser backup',
-                          ]
-                        : [
-                            '1M+ concurrent attendee support',
-                            'Dedicated media server clusters',
-                            'Custom white-label domain & SSL',
-                            'Dedicated account manager & 99.99% SLA',
-                          ]
-                      ).map((feat, i) => (
-                        <div key={i} className="flex items-center gap-2.5 text-xs sm:text-sm text-slate-200">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                          <span>{feat}</span>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Trust Badges matching Screenshot 2 */}
-                    <div className="pt-5 mt-5 border-t border-white/10 flex flex-wrap items-center gap-4 text-xs text-slate-400">
-                      <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
-                        <span>★★★★★</span>
-                        <span className="text-slate-300">4.9/5 Rating</span>
-                      </div>
-                      <span className="text-white/20">•</span>
-                      <div className="flex items-center gap-1.5 text-slate-300">
-                        <ShieldCheck className="w-4 h-4 text-blue-400" />
-                        <span>256-bit TLS Encryption</span>
-                      </div>
-                      <span className="text-white/20">•</span>
-                      <div className="flex items-center gap-1.5 text-slate-300">
-                        <Zap className="w-4 h-4 text-amber-400" />
-                        <span>Instant Activation</span>
-                      </div>
-                    </div>
+                  <div className="text-left md:text-right bg-black/30 p-4 rounded-2xl border border-white/5 min-w-[180px]">
+                    <span className="text-[11px] uppercase tracking-wider text-slate-400 block">Tier Pricing</span>
+                    <span className="text-3xl sm:text-4xl font-extrabold text-[#0b5cff]">
+                      {selectedPlanTab === 'starter' ? '₹999' : selectedPlanTab === 'pro' ? '₹1,999' : 'Custom'}
+                    </span>
+                    <span className="text-xs text-slate-400 font-medium ml-1">/month</span>
                   </div>
                 </div>
 
-                {/* Right side: Interactive Registration / Signup Card (Matching Screenshot 2 Right Card) */}
-                <div className="lg:col-span-5 bg-white text-slate-900 rounded-3xl p-6 sm:p-8 shadow-2xl border border-slate-100 relative">
-                  {/* Top badges */}
-                  <div className="flex items-center justify-between gap-2 pb-4 border-b border-slate-100">
-                    <span className="text-[11px] font-bold text-[#0b5cff] bg-blue-50 border border-blue-200 px-3 py-1 rounded-full uppercase tracking-wider">
-                      ✦ SELECTED: {selectedPlanTab.toUpperCase()} PLAN
-                    </span>
-                    <span className="text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1 rounded-full">
-                      14-Day Free Trial
-                    </span>
-                  </div>
-
-                  <div className="mt-4">
-                    <h3 className="text-2xl font-bold text-slate-900 tracking-tight capitalize">
-                      Create {selectedPlanTab} Account
-                    </h3>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-1">
-                      Join over 10,000+ teams streaming high-impact webinars on JUMMP.
-                    </p>
-                  </div>
-
-                  {/* Sign up with Google */}
-                  <div className="mt-5">
-                    <Link
-                      href={`/signup?plan=${selectedPlanTab}`}
-                      target="_blank"
-                      className="w-full py-2.5 px-4 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold text-xs flex items-center justify-center gap-2 transition-all shadow-xs"
-                    >
-                      <svg className="w-4 h-4" viewBox="0 0 24 24">
-                        <path
-                          fill="#4285F4"
-                          d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                        />
-                        <path
-                          fill="#34A853"
-                          d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                        />
-                        <path
-                          fill="#FBBC05"
-                          d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-                        />
-                        <path
-                          fill="#EA4335"
-                          d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                        />
-                      </svg>
-                      <span>Sign up with Google</span>
-                    </Link>
-                  </div>
-
-                  <div className="flex items-center my-4">
-                    <div className="flex-1 border-t border-slate-200" />
-                    <span className="px-3 text-[10px] font-bold uppercase text-slate-400 tracking-wider">
-                      OR CORPORATE EMAIL
-                    </span>
-                    <div className="flex-1 border-t border-slate-200" />
-                  </div>
-
-                  {/* Mock Form Inputs matching Screenshot 2 */}
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase text-slate-700 mb-1 tracking-wider">
-                        FULL NAME
-                      </label>
-                      <div className="relative">
-                        <Users className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        <input
-                          type="text"
-                          readOnly
-                          value="Alex Morgan"
-                          className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 text-slate-600 focus:outline-none cursor-default"
-                        />
-                      </div>
+                {/* Feature checklist grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-6 mt-6 border-t border-white/10">
+                  {(selectedPlanTab === 'starter'
+                    ? [
+                        'Unlimited attendees per session',
+                        '1 active concurrent room',
+                        '1080p Full HD streaming',
+                        'Live chat, Q&A & polls',
+                      ]
+                    : selectedPlanTab === 'pro'
+                    ? [
+                        'Unlimited attendees (no seat caps)',
+                        'Unlimited concurrent webinar rooms',
+                        '1080p 60fps & 4K ultra-low latency',
+                        'Timed offer cards & ticket sales',
+                        'Real-time attendance & retention curves',
+                        'Cloud recording & browser backup',
+                        'Custom GA4 & Meta Pixel tracking',
+                        'API & Webhooks access',
+                      ]
+                    : [
+                        '1M+ concurrent attendee support',
+                        'Dedicated media server clusters',
+                        'Custom white-label domain & SSL',
+                        'Dedicated account manager & 99.99% SLA',
+                        'Full data export & BigQuery sync',
+                        'Custom legal and SLA agreements',
+                        'Single Sign-On (SAML / Okta)',
+                        'Priority 24/7 engineering hotline',
+                      ]
+                  ).map((feat, i) => (
+                    <div key={i} className="flex items-center gap-2.5 text-xs sm:text-sm text-slate-200 bg-white/[0.02] p-3 rounded-xl border border-white/5">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{feat}</span>
                     </div>
+                  ))}
+                </div>
 
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase text-slate-700 mb-1 tracking-wider">
-                        CORPORATE EMAIL
-                      </label>
-                      <div className="relative">
-                        <Terminal className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        <input
-                          type="email"
-                          readOnly
-                          value="alex@company.com"
-                          className="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 text-slate-600 focus:outline-none cursor-default"
-                        />
-                      </div>
+                {/* Trust Badges */}
+                <div className="pt-6 mt-6 border-t border-white/10 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400">
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
+                      <span>★★★★★</span>
+                      <span className="text-slate-300">4.9/5 Rating</span>
                     </div>
-
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase text-slate-700 mb-1 tracking-wider">
-                        CREATE PASSWORD
-                      </label>
-                      <div className="relative">
-                        <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        <input
-                          type="password"
-                          readOnly
-                          value="supersecretpassword"
-                          className="w-full pl-9 pr-8 py-2 text-xs rounded-xl border border-slate-200 bg-slate-50 text-slate-600 focus:outline-none cursor-default font-mono"
-                        />
-                        <span className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 text-xs cursor-default">
-                          👁
-                        </span>
-                      </div>
+                    <span className="text-white/20">•</span>
+                    <div className="flex items-center gap-1.5 text-slate-300">
+                      <ShieldCheck className="w-4 h-4 text-blue-400" />
+                      <span>256-bit TLS Encryption</span>
                     </div>
-
-                    <Link
-                      href={`/signup?plan=${selectedPlanTab}`}
-                      target="_blank"
-                      className="w-full mt-2 py-3 rounded-xl bg-[#0b5cff] hover:bg-blue-600 active:scale-[0.98] text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-blue-500/25 transition-all"
-                    >
-                      <span>Complete Registration</span>
-                      <ArrowRight className="w-3.5 h-3.5" />
-                    </Link>
-
-                    <p className="text-[10px] text-slate-400 text-center leading-normal pt-1">
-                      By registering, you agree to our <Link href="/terms" target="_blank" className="underline hover:text-slate-600">Terms of Service</Link> and <Link href="/privacy" target="_blank" className="underline hover:text-slate-600">Privacy Policy</Link>. No credit card required to start.
-                    </p>
+                    <span className="text-white/20">•</span>
+                    <div className="flex items-center gap-1.5 text-slate-300">
+                      <Zap className="w-4 h-4 text-amber-400" />
+                      <span>Instant Activation</span>
+                    </div>
                   </div>
+
+                  <Link
+                    href={`/signup?plan=${selectedPlanTab}`}
+                    target="_blank"
+                    className="inline-flex items-center gap-1 text-[#0b5cff] hover:underline text-xs font-semibold"
+                  >
+                    <span>View live registration at /signup?plan={selectedPlanTab}</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </Link>
                 </div>
               </div>
 
