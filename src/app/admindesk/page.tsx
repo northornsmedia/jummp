@@ -102,7 +102,12 @@ interface StatusPayload {
     nodeVersion: string;
     platform: string;
     memoryUsageMB: number;
+    heapUsedMB?: number;
+    heapTotalMB?: number;
+    externalMB?: number;
+    uptimeSecs?: number;
     env: string;
+    measuredAt?: string;
   };
 }
 
@@ -160,6 +165,9 @@ export default function AdminDeskPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [refreshInterval, setRefreshInterval] = useState<number>(2000); // 2-second live streaming by default
+  const [lastSyncTime, setLastSyncTime] = useState<number>(Date.now());
+  const [latencyHistory, setLatencyHistory] = useState<number[]>([]);
   const [sweeping, setSweeping] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'stale' | 'ended'>('all');
@@ -210,6 +218,14 @@ export default function AdminDeskPage() {
       const payload: StatusPayload = parsed.data;
       setData(payload);
       setIsAuthenticated(true);
+      setLastSyncTime(Date.now());
+
+      // Track latency history for live sparkline
+      const dbCheck = payload.checks.find((c) => c.category === 'database');
+      if (dbCheck && typeof dbCheck.latencyMs === 'number') {
+        setLatencyHistory((prev) => [...prev.slice(-14), dbCheck.latencyMs!]);
+      }
+
       if (isManual) {
         addLog('success', `Diagnostic refresh completed in ${payload.scanDurationMs}ms (Status: ${payload.overallStatus.toUpperCase()})`);
       }
@@ -363,14 +379,14 @@ export default function AdminDeskPage() {
     };
   }, [isAuthenticated, addLog, fetchStatus]);
 
-  // Auto-sync polling every 5s for LiveKit SFU active rooms sync
+  // Auto-sync polling (default 2s for live real-time latency & room monitoring)
   useEffect(() => {
     if (!isAuthenticated || !autoRefresh) return;
     const timer = setInterval(() => {
       fetchStatus(false);
-    }, 5000);
+    }, refreshInterval);
     return () => clearInterval(timer);
-  }, [isAuthenticated, autoRefresh, fetchStatus]);
+  }, [isAuthenticated, autoRefresh, refreshInterval, fetchStatus]);
 
   // Extend Heartbeat (+10m) Action
   const handleExtendHeartbeat = async (code: string) => {
@@ -454,6 +470,9 @@ export default function AdminDeskPage() {
     if (!data?.recentMeetings) return [];
     return data.recentMeetings.filter((m) => m.status === 'active');
   }, [data?.recentMeetings]);
+
+  // Real-time elapsed seconds since last telemetry query
+  const secondsSinceSync = Math.max(0, Math.floor((now - lastSyncTime) / 1000));
 
   // Filtered meetings list
   const filteredMeetings = useMemo(() => {
@@ -644,18 +663,44 @@ export default function AdminDeskPage() {
 
           {/* Quick Controls */}
           <div className="flex flex-wrap items-center gap-3">
-            {/* Auto Refresh Switch */}
-            <button
-              onClick={() => setAutoRefresh(!autoRefresh)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-all ${
-                autoRefresh
-                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-sm shadow-emerald-500/10'
-                  : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'
-              }`}
-            >
-              <span className={`w-2 h-2 rounded-full ${autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-              Auto-sync: {autoRefresh ? '5s Active' : 'Paused'}
-            </button>
+            {/* Auto Refresh & Cadence Selector */}
+            <div className="flex items-center gap-1.5 p-1 rounded-xl bg-white/5 border border-white/10">
+              <button
+                onClick={() => setAutoRefresh(!autoRefresh)}
+                className={`flex items-center gap-2 px-2.5 py-1 rounded-lg text-xs font-medium transition-all ${
+                  autoRefresh
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+                {autoRefresh ? 'Realtime Live' : 'Paused'}
+              </button>
+
+              {autoRefresh && (
+                <div className="flex items-center text-[10px] font-mono text-slate-400 gap-1 pl-1 pr-1.5">
+                  <button
+                    onClick={() => setRefreshInterval(2000)}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      refreshInterval === 2000 ? 'bg-[#0b5cff] text-white font-bold' : 'hover:text-white'
+                    }`}
+                    title="2-second fast realtime streaming"
+                  >
+                    2s
+                  </button>
+                  <span>•</span>
+                  <button
+                    onClick={() => setRefreshInterval(5000)}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      refreshInterval === 5000 ? 'bg-[#0b5cff] text-white font-bold' : 'hover:text-white'
+                    }`}
+                    title="5-second interval"
+                  >
+                    5s
+                  </button>
+                </div>
+              )}
+            </div>
 
             {/* Sweep Stale Button */}
             <button
@@ -785,13 +830,28 @@ export default function AdminDeskPage() {
               </div>
 
               {/* Server Info Tag */}
-              <div className="flex items-center gap-3 text-xs text-slate-400 bg-white/5 px-3 py-2 rounded-xl border border-white/10 w-fit">
-                <Server className="w-4 h-4 text-blue-400" />
-                <span>Node {data?.server.nodeVersion || 'v20+'}</span>
+              <div className="flex flex-wrap items-center gap-2.5 text-xs text-slate-300 bg-white/5 px-3.5 py-2 rounded-xl border border-white/10 w-fit shadow-sm">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <Server className="w-3.5 h-3.5 text-blue-400" />
+                  <span className="font-semibold text-white">Node {data?.server.nodeVersion || 'v20+'}</span>
+                </div>
                 <span className="text-white/20">•</span>
-                <span>RSS: {data?.server.memoryUsageMB || 0} MB</span>
+                <span className="font-mono text-emerald-300 font-semibold" title={`Heap: ${data?.server.heapUsedMB || 0} MB / ${data?.server.heapTotalMB || 0} MB`}>
+                  RSS: {data?.server.memoryUsageMB || 0} MB
+                </span>
+                {data?.server.heapUsedMB !== undefined && (
+                  <>
+                    <span className="text-white/20">•</span>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      Heap: {data.server.heapUsedMB} MB
+                    </span>
+                  </>
+                )}
                 <span className="text-white/20">•</span>
-                <span className="capitalize">{data?.server.env || 'dev'}</span>
+                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+                  LIVE {secondsSinceSync === 0 ? 'just now' : `${secondsSinceSync}s ago`}
+                </span>
               </div>
             </div>
           </div>
@@ -861,17 +921,47 @@ export default function AdminDeskPage() {
           </div>
 
           <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/10 backdrop-blur-xl hover:border-white/20 transition-all">
-            <div className="flex items-center justify-between text-slate-400 mb-2">
-              <span className="text-xs font-medium">Database Latency</span>
+            <div className="flex items-center justify-between text-slate-400 mb-1.5">
+              <span className="text-xs font-medium flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                Database Latency
+              </span>
               <Zap className="w-4 h-4 text-amber-400" />
             </div>
-            <div className="text-2xl font-bold text-white tracking-tight">
-              {data?.checks.find((c) => c.category === 'database')?.latencyMs !== null
-                ? `${data?.checks.find((c) => c.category === 'database')?.latencyMs}ms`
-                : '--'}
+            <div className="flex items-baseline gap-2">
+              <div className="text-2xl font-bold text-white tracking-tight font-mono">
+                {data?.checks.find((c) => c.category === 'database')?.latencyMs !== null
+                  ? `${data?.checks.find((c) => c.category === 'database')?.latencyMs}ms`
+                  : '--'}
+              </div>
+              <span className="text-[10px] font-semibold text-emerald-400 uppercase tracking-wider font-mono">
+                LIVE
+              </span>
             </div>
-            <div className="text-[11px] text-emerald-400 mt-1 flex items-center gap-1">
-              <Check className="w-3 h-3" /> Supabase Postgres direct query
+
+            {/* Live Sparkline Jitter Visualizer */}
+            <div className="flex items-end gap-1 h-3.5 mt-2 mb-1.5 px-0.5">
+              {(latencyHistory.length > 0 ? latencyHistory : [180, 195, 213]).map((val, idx) => {
+                const maxVal = Math.max(...latencyHistory, 300);
+                const heightPct = Math.max(20, Math.min(100, Math.round((val / maxVal) * 100)));
+                return (
+                  <div
+                    key={idx}
+                    title={`${val}ms`}
+                    className="flex-1 rounded-sm bg-gradient-to-t from-blue-600 to-emerald-400 opacity-80 hover:opacity-100 transition-all"
+                    style={{ height: `${heightPct}%` }}
+                  />
+                );
+              })}
+            </div>
+
+            <div className="text-[11px] text-slate-400 flex items-center justify-between">
+              <span className="flex items-center gap-1 text-emerald-400">
+                <Check className="w-3 h-3" /> Supabase Postgres
+              </span>
+              <span className="font-mono text-[10px] text-slate-500">
+                {secondsSinceSync === 0 ? 'pinged now' : `${secondsSinceSync}s ago`}
+              </span>
             </div>
           </div>
         </section>
@@ -1464,11 +1554,38 @@ export default function AdminDeskPage() {
                               </span>
                             </td>
 
-                            <td className="py-3 px-4 text-slate-400 font-mono">
-                              {new Date(room.created_at).toLocaleDateString()}
+                            <td className="py-3 px-4 font-mono">
+                              <div className="text-white font-medium text-xs">
+                                {new Date(room.created_at).toLocaleDateString(undefined, {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  year: 'numeric',
+                                })}
+                              </div>
+                              <div className="text-[11px] text-blue-400 font-medium flex items-center gap-1 mt-0.5">
+                                <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                                <span>
+                                  {new Date(room.created_at).toLocaleTimeString(undefined, {
+                                    hour: '2-digit',
+                                    minute: '2-digit',
+                                    second: '2-digit',
+                                    hour12: true,
+                                  })}
+                                </span>
+                              </div>
                             </td>
-                            <td className="py-3 px-4 text-slate-400">
-                              {diffMins < 1 ? 'Just now' : `${diffMins}m ago`}
+                            <td className="py-3 px-4">
+                              <div className="text-slate-200 text-xs font-medium">
+                                {diffMins < 1 ? 'Just now (<1m)' : `${diffMins}m ago`}
+                              </div>
+                              <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                {new Date(room.last_activity_at || room.created_at).toLocaleTimeString(undefined, {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                  hour12: true,
+                                })}
+                              </div>
                             </td>
                             <td className="py-3 px-4 text-right">
                               <div className="flex items-center justify-end gap-2">

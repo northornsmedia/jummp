@@ -87,7 +87,7 @@ export async function GET(req: NextRequest) {
   };
 
   if (process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
-    const sbStart = Date.now();
+    const sbStart = performance.now();
     try {
       const supabase = createClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL,
@@ -101,7 +101,7 @@ export async function GET(req: NextRequest) {
         .order('created_at', { ascending: false })
         .limit(50);
 
-      const sbLatency = Date.now() - sbStart;
+      const sbLatency = Math.round(performance.now() - sbStart);
 
       if (meetErr) {
         checks.push({
@@ -230,7 +230,7 @@ export async function GET(req: NextRequest) {
     process.env.LIVEKIT_API_KEY &&
     process.env.LIVEKIT_API_SECRET
   ) {
-    const lkStart = Date.now();
+    const lkStart = performance.now();
     try {
       const roomClient = new RoomServiceClient(
         process.env.NEXT_PUBLIC_LIVEKIT_URL,
@@ -239,7 +239,7 @@ export async function GET(req: NextRequest) {
       );
 
       livekitRooms = await roomClient.listRooms();
-      const lkLatency = Date.now() - lkStart;
+      const lkLatency = Math.round(performance.now() - lkStart);
 
       totalLiveKitParticipants = livekitRooms.reduce((acc, r) => acc + (r.numParticipants || 0), 0);
 
@@ -260,7 +260,7 @@ export async function GET(req: NextRequest) {
         name: 'LiveKit SFU Cloud',
         category: 'sfu',
         status: 'down',
-        latencyMs: Date.now() - lkStart,
+        latencyMs: Math.round(performance.now() - lkStart),
         message: `LiveKit SFU unreachable: ${e.message || e}`,
       });
     }
@@ -418,7 +418,12 @@ export async function GET(req: NextRequest) {
       nodeVersion: process.version,
       platform: process.platform,
       memoryUsageMB: Number((process.memoryUsage().rss / (1024 * 1024)).toFixed(1)),
+      heapUsedMB: Number((process.memoryUsage().heapUsed / (1024 * 1024)).toFixed(1)),
+      heapTotalMB: Number((process.memoryUsage().heapTotal / (1024 * 1024)).toFixed(1)),
+      externalMB: Number((process.memoryUsage().external / (1024 * 1024)).toFixed(1)),
+      uptimeSecs: Math.round(process.uptime()),
       env: process.env.NODE_ENV || 'development',
+      measuredAt: new Date().toISOString(),
     },
   });
 }
