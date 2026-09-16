@@ -104,6 +104,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [isResyncing, setIsResyncing] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
 
+  // 10-Minute Inactivity Watchdog ("Are you still here?")
+  const [showStillHereModal, setShowStillHereModal] = useState(false);
+  const [stillHereCountdown, setStillHereCountdown] = useState(60);
+  const aloneSinceRef = useRef<number | null>(null);
+
   // Browser-Side Recording State (MediaRecorder)
   const [isRecording, setIsRecording] = useState(false);
   const [isPausedRecording, setIsPausedRecording] = useState(false);
@@ -241,6 +246,120 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
+
+  // =========================================================================
+  // BACKEND HEARTBEAT & 10-MINUTE INACTIVITY SYNC (Robust Supabase API)
+  // =========================================================================
+  useEffect(() => {
+    if (!inCall) return;
+
+    const sendBackendHeartbeat = async (action: 'heartbeat' | 'leave' = 'heartbeat') => {
+      try {
+        const res = await fetch('/api/meet/heartbeat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: meetingId,
+            participantName: userName || (isHost ? 'Host' : 'Guest'),
+            isHost,
+            action,
+          }),
+        });
+        const data = await res.json();
+        if (data.isInactiveEnded && !isHost) {
+          showToast('Meeting Inactive', 'Room closed after 10 minutes of inactivity.', 'info');
+        }
+      } catch (e) {
+        if (dbMeeting) {
+          updateMeetingHeartbeat(dbMeeting.id);
+        }
+      }
+    };
+
+    sendBackendHeartbeat('heartbeat');
+
+    const interval = setInterval(() => {
+      sendBackendHeartbeat('heartbeat');
+    }, 20000);
+
+    return () => {
+      clearInterval(interval);
+      sendBackendHeartbeat('leave');
+    };
+  }, [inCall, meetingId, userName, isHost, dbMeeting, showToast]);
+
+  // =========================================================================
+  // 10-MINUTE ALONE INACTIVITY WATCHDOG ("Are you still here?")
+  // =========================================================================
+  useEffect(() => {
+    if (!inCall) {
+      aloneSinceRef.current = null;
+      setShowStillHereModal(false);
+      return;
+    }
+
+    const otherParticipantsCount = participants.filter((p) => p.name !== userName).length;
+
+    if (otherParticipantsCount === 0) {
+      if (!aloneSinceRef.current) {
+        aloneSinceRef.current = Date.now();
+      }
+    } else {
+      aloneSinceRef.current = null;
+      setShowStillHereModal(false);
+      return;
+    }
+
+    // Check every 8 seconds if 10 minutes (600,000 ms) have passed alone
+    const watchdogInterval = setInterval(() => {
+      if (aloneSinceRef.current && !showStillHereModal) {
+        const elapsed = Date.now() - aloneSinceRef.current;
+        if (elapsed >= 10 * 60 * 1000) {
+          playChime('knock');
+          triggerHaptic('heavy');
+          setShowStillHereModal(true);
+          setStillHereCountdown(60);
+        }
+      }
+    }, 8000);
+
+    return () => clearInterval(watchdogInterval);
+  }, [inCall, participants, userName, showStillHereModal]);
+
+  // Countdown timer when "Are you still here?" modal is shown
+  useEffect(() => {
+    if (!showStillHereModal) return;
+
+    const timer = setInterval(() => {
+      setStillHereCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          handleLeaveCall();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [showStillHereModal]);
+
+  const handleStayInMeeting = () => {
+    triggerHaptic('medium');
+    setShowStillHereModal(false);
+    aloneSinceRef.current = Date.now();
+    fetch('/api/meet/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: meetingId,
+        participantName: userName || (isHost ? 'Host' : 'Guest'),
+        isHost,
+        action: 'keepalive',
+      }),
+    }).catch(() => {});
+    showToast('Meeting Active', 'You are still in the call. Inactivity timer reset.', 'info');
+  };
 
   // =========================================================================
   // BROWSER-SIDE MEDIA RECORDER (Apple-Grade Client Video & Audio Recording)
@@ -493,22 +612,36 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         console.log('JUMMP Meet: App returned to foreground. Performing deep recovery...');
         setIsResyncing(true);
 
-        // 1. Force unpause all video elements (Safari & Chrome mobile pause them in background)
+        // 1. Force unpause and kickstart all video elements (Safari & Chrome mobile freeze or pause them in background)
         const allVideos = document.querySelectorAll('video');
         allVideos.forEach((video) => {
-          if (video.paused) {
-            video.play().catch((e) => {
-              console.warn('Video auto-resume blocked by browser policy:', e);
-              setAutoplayBlocked(true);
+          const playPromise = video.play();
+          if (playPromise !== undefined) {
+            playPromise.catch((e) => {
+              if (e.name === 'NotAllowedError') {
+                setAutoplayBlocked(true);
+              }
             });
           }
         });
 
-        // 2. Check if local camera/mic tracks were revoked or ended by OS
+        // 2. Re-bind local streams if video elements got unlinked
+        if (localStreamRef.current) {
+          if (inCallVideoRef.current && inCallVideoRef.current.srcObject !== localStreamRef.current) {
+            inCallVideoRef.current.srcObject = localStreamRef.current;
+            inCallVideoRef.current.play().catch(() => {});
+          }
+          if (localVideoRef.current && localVideoRef.current.srcObject !== localStreamRef.current) {
+            localVideoRef.current.srcObject = localStreamRef.current;
+            localVideoRef.current.play().catch(() => {});
+          }
+        }
+
+        // 3. Check if local camera/mic tracks were revoked or ended by OS
         const currentTracks = localStreamRef.current?.getTracks() || [];
         const hasDeadTrack =
           currentTracks.length === 0 ||
-          currentTracks.some((t) => t.readyState === 'ended' || t.muted);
+          currentTracks.some((t) => t.readyState === 'ended');
 
         if (hasDeadTrack && (camEnabled || micEnabled)) {
           console.log('Re-acquiring dead media tracks after background return...');
@@ -541,12 +674,37 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           }
         }
 
-        // 3. LiveKit SFU Reconnection Check
+        // 4. WebRTC ICE Self-Healing: Reconnect any peer connections broken by background sleep
+        Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+          const isBadState =
+            pc.iceConnectionState === 'disconnected' ||
+            pc.iceConnectionState === 'failed' ||
+            pc.connectionState === 'disconnected' ||
+            pc.connectionState === 'failed';
+
+          if (isBadState) {
+            console.log(`[WebRTC] Healing degraded connection to ${peerName}...`);
+            try {
+              if (pc.restartIce) pc.restartIce();
+              const offer = await pc.createOffer({ iceRestart: true });
+              await pc.setLocalDescription(offer);
+              channelRef.current?.send('WEBRTC_SIGNAL', {
+                from: userName || (isHost ? 'Host' : 'Guest'),
+                to: peerName,
+                type: 'offer',
+                sdp: offer,
+              });
+            } catch (err) {
+              console.warn('ICE recovery offer failed:', err);
+            }
+          }
+        });
+
+        // 5. LiveKit SFU Reconnection Check
         if (livekitRoomRef.current) {
           const room = livekitRoomRef.current;
           if (room.state === 'disconnected') {
             console.log('LiveKit room disconnected during background. Triggering reconnection...');
-            // Re-fetch token and connect
             try {
               const name = userName || (isHost ? 'Host' : 'Guest');
               const res = await fetch(`/api/livekit/token?room=${meetingId}&username=${encodeURIComponent(name)}`);
@@ -560,20 +718,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           }
         }
 
-        // 4. Web Audio Context Resume
-        try {
-          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-          if (AudioContextClass) {
-            // Wake any suspended context
-          }
-        } catch {}
-
-        // 5. Broadcast RESYNC ping to notify peers we are back
+        // 6. Broadcast RESYNC ping to notify peers we are back
         if (channelRef.current && inCall) {
           channelRef.current.send('PEER_RESYNC', {
             name: userName || (isHost ? 'Host' : 'Guest'),
             timestamp: Date.now(),
           });
+        }
+
+        // 7. Check if 10-minute alone watchdog expired while tab was hidden
+        if (inCall && aloneSinceRef.current && !showStillHereModal) {
+          const elapsed = Date.now() - aloneSinceRef.current;
+          if (elapsed >= 10 * 60 * 1000) {
+            playChime('knock');
+            triggerHaptic('heavy');
+            setShowStillHereModal(true);
+            setStillHereCountdown(60);
+          }
         }
 
         setTimeout(() => {
@@ -776,6 +937,25 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       }
     };
 
+    // Auto-healing for background app-switching and stale ICE
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC] ICE state with ${targetName}:`, pc.iceConnectionState);
+      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        if (pc.restartIce) {
+          pc.restartIce();
+        }
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC] Connection state with ${targetName}:`, pc.connectionState);
+      if (pc.connectionState === 'failed') {
+        if (pc.restartIce) {
+          pc.restartIce();
+        }
+      }
+    };
+
     peerConnectionsRef.current[targetName] = pc;
     return pc;
   };
@@ -908,6 +1088,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
         try {
           if (type === 'offer') {
+            if (pc.signalingState !== 'stable') {
+              try {
+                await pc.setLocalDescription({ type: 'rollback' });
+              } catch {
+                pc.close();
+                pc = createPeerConnection(from);
+              }
+            }
             await pc.setRemoteDescription(new RTCSessionDescription(sdp));
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
@@ -918,9 +1106,17 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               sdp: answer,
             });
           } else if (type === 'answer') {
-            await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+            if (pc.signalingState === 'have-local-offer') {
+              await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+            }
           } else if (type === 'candidate' && candidate) {
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            try {
+              if (pc.remoteDescription) {
+                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+              }
+            } catch (candErr) {
+              console.warn('ICE candidate addition skipped:', candErr);
+            }
           }
         } catch (e) {
           console.log('WebRTC signaling error:', e);
@@ -1247,7 +1443,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // VIEW 1: EXPIRED MEETING SCREEN (When clicked after weeks of inactivity)
   // JUMMP Meet Lifecycle Handling
   // =========================================================================
-  if (statusCheck?.isExpired) {
+  if (statusCheck?.isExpired || statusCheck?.isEnded) {
+    const isEndedInactivity = statusCheck?.isEnded && !statusCheck?.isExpired;
     return (
       <div className="min-h-[100dvh] h-[100dvh] bg-slate-950 text-white flex flex-col justify-between selection:bg-blue-500/30">
         {/* Header */}
@@ -1260,7 +1457,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           </div>
         </header>
 
-        {/* Expired Notification Card */}
+        {/* Expired / Ended Inactivity Notification Card */}
         <main className="max-w-md w-full mx-auto px-5 py-8 flex-1 flex flex-col items-center justify-center text-center space-y-5 animate-in fade-in zoom-in-95 duration-250">
           <div className="w-16 h-16 rounded-3xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-xl">
             <Clock className="w-8 h-8" />
@@ -1269,14 +1466,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="space-y-2">
             <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/20 text-[11px] font-semibold text-amber-400">
               <AlertCircle className="w-3.5 h-3.5" />
-              <span>Link Expired</span>
+              <span>{isEndedInactivity ? 'Meeting Inactive' : 'Link Expired'}</span>
             </div>
             <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-              This meeting link has expired
+              {isEndedInactivity ? 'This meeting has ended' : 'This meeting link has expired'}
             </h2>
             <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
-              Per JUMMP Meet protocol, inactive links expire after 30 days. This room was inactive for{' '}
-              <span className="text-white font-semibold">{statusCheck.daysInactive} days</span>.
+              {isEndedInactivity
+                ? 'This room was marked inactive because nobody was in the meeting for 10 minutes.'
+                : `Per JUMMP Meet protocol, inactive links expire after 30 days. This room was inactive for ${statusCheck?.daysInactive || 0} days.`}
             </p>
           </div>
 
@@ -1737,6 +1935,53 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md shadow-blue-500/30"
                   >
                     Admit
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* GOOGLE MEET INACTIVITY WATCHDOG MODAL: "Are you still here?" */}
+          {showStillHereModal && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in zoom-in-95 duration-200">
+              <div className="max-w-sm w-full bg-slate-900/98 border border-amber-500/40 rounded-3xl p-6 text-center shadow-2xl shadow-amber-500/10 space-y-4">
+                <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mx-auto animate-pulse">
+                  <Clock className="w-7 h-7" />
+                </div>
+
+                <div className="space-y-1.5">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-[11px] font-semibold text-amber-400">
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    <span>Inactivity Warning</span>
+                  </div>
+                  <h3 className="text-xl font-extrabold text-white tracking-tight">Are you still in the meeting?</h3>
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    You've been the only participant in this call for 10 minutes. To save bandwidth and battery, this room will end automatically in:
+                  </p>
+                  <div className="pt-2">
+                    <span className="text-3xl font-mono font-extrabold text-amber-400 bg-amber-500/10 px-4 py-1.5 rounded-2xl border border-amber-500/20 inline-block shadow-inner">
+                      {stillHereCountdown}s
+                    </span>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex flex-col gap-2.5">
+                  <button
+                    type="button"
+                    onClick={handleStayInMeeting}
+                    className="w-full py-3 px-4 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-xs shadow-lg shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>I'm still here (Stay in call)</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleLeaveCall}
+                    className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-300 font-semibold text-xs border border-slate-700 transition-all flex items-center justify-center gap-2"
+                  >
+                    <PhoneOff className="w-4 h-4 text-red-400" />
+                    <span>Leave call now</span>
                   </button>
                 </div>
               </div>

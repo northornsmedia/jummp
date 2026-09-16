@@ -88,15 +88,30 @@ export async function checkMeetingStatus(code: string): Promise<MeetingStatusChe
     // Links inactive for more than 30 days are categorized as expired in JUMMP Meet protocol
     const isExpired = diffDays >= 30;
 
-    // Active if heartbeat within last 3 minutes and not ended
-    const isActive = meeting.status === 'active' && diffMinutes <= 3;
-    const isEnded = meeting.status === 'ended';
+    // 10-Minute Inactivity Rule: If nobody is in the meeting (active_participants_count <= 0) for 10+ minutes
+    const isTenMinutesInactive =
+      (meeting.active_participants_count <= 0 || !meeting.active_participants_count) &&
+      diffMinutes >= 10;
+    const isEnded = meeting.status === 'ended' || isTenMinutesInactive;
+    const isActive = meeting.status === 'active' && !isEnded && diffMinutes <= 3;
+
+    if (isTenMinutesInactive && meeting.status !== 'ended') {
+      supabase
+        .from('meetings')
+        .update({
+          status: 'ended',
+          ended_at: new Date().toISOString(),
+          active_participants_count: 0,
+        })
+        .eq('id', meeting.id)
+        .then(() => {});
+    }
 
     let message = 'Room is ready to join';
     if (isExpired) {
       message = `This meeting link expired after ${diffDays} days of inactivity.`;
     } else if (isEnded) {
-      message = 'This meeting has ended. You can rejoin or start a new call.';
+      message = 'This meeting ended due to inactivity (nobody was in the room for 10+ minutes).';
     } else if (isActive) {
       message = 'Meeting is currently live with active participants.';
     }
