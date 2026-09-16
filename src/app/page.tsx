@@ -70,8 +70,8 @@ export default function LandingPage() {
           <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-96 bg-gradient-to-r from-blue-400/10 via-indigo-300/10 to-blue-500/10 blur-3xl -z-10 pointer-events-none" />
 
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-            {/* Top Pill Announcement */}
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-50 border border-amber-200/80 text-amber-900 text-xs sm:text-sm font-semibold mb-6 shadow-xs hover:bg-amber-100/70 transition-colors">
+            {/* Top Announcement Tag */}
+            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-50 border border-amber-200/80 text-amber-900 text-xs sm:text-sm font-semibold mb-6 shadow-xs hover:bg-amber-100/70 transition-colors">
               <span className="flex h-2 w-2 rounded-full bg-amber-500 animate-ping" />
               <Flame className="w-4 h-4 text-amber-600" />
               <span>Stop Paying ₹10,000 per month to run webinars</span>
@@ -92,42 +92,9 @@ export default function LandingPage() {
               A single platform that widens your reach and raises the bar on every event—from marketing keynotes to 100k+ broadcasts. Browser-native, ultra-low latency, and zero seat restrictions.
             </p>
 
-            {/* Dual CTAs */}
-            <div className="mt-8 sm:mt-10 flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-4 max-w-md mx-auto">
-              <Link
-                href="/signup"
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 text-base font-bold text-white bg-[#0b5cff] hover:bg-[#0a75e7] px-8 py-4 rounded-xl shadow-lg shadow-blue-500/25 active:scale-98 transition-all"
-              >
-                Start Free Account
-                <ArrowRight className="w-5 h-5" />
-              </Link>
-              <button
-                type="button"
-                onClick={() => setVideoModalOpen(true)}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2.5 text-base font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 px-6 py-4 rounded-xl shadow-xs transition-colors"
-              >
-                <div className="w-6 h-6 rounded-full bg-blue-50 flex items-center justify-center text-[#0b5cff]">
-                  <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
-                </div>
-                Product walkthrough
-              </button>
-            </div>
-
-            {/* Google Meet Style Instant Start & Join Bar on Front Page */}
-            <div className="mt-8 max-w-xl mx-auto">
-              <div className="p-3 sm:p-3.5 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200/90 shadow-xl shadow-blue-500/5">
-                <div className="flex items-center justify-between px-2 pb-2.5 text-xs text-slate-500 border-b border-slate-100 mb-3">
-                  <div className="flex items-center gap-1.5 font-bold text-[#00053d]">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    <span>JUMMP Meet</span>
-                    <span className="font-normal text-slate-400">• Google Meet style calls</span>
-                  </div>
-                  <span className="text-[10px] font-bold text-[#0b5cff] bg-blue-50 border border-blue-100 px-2 py-0.5 rounded-full">
-                    Instant Link • No Install
-                  </span>
-                </div>
-                <MeetingBar />
-              </div>
+            {/* JUMMP Meet Instant Start & Join Bar on Front Page */}
+            <div className="mt-8 max-w-2xl mx-auto">
+              <MeetingBar />
             </div>
 
             {/* Live Metrics Row */}
@@ -220,22 +187,22 @@ export default function LandingPage() {
           </div>
         </section>
 
-        {/* ================= JUMMP MEET (GOOGLE MEET SERVICE) SHOWCASE ================= */}
+        {/* ================= JUMMP MEET SHOWCASE ================= */}
         <section id="meet" className="py-16 md:py-24 bg-gradient-to-b from-white via-blue-50/20 to-white">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="text-center max-w-3xl mx-auto mb-12">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
+              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-lg border border-blue-100">
                 JUMMP Meet Service
               </span>
               <h2 className="text-3xl sm:text-4xl md:text-5xl font-extrabold text-[#00053d] mt-3 tracking-tight">
-                Google Meet simplicity, <span className="text-[#0b5cff]">built right into JUMMP</span>.
+                Effortless video meetings, <span className="text-[#0b5cff]">built right into JUMMP</span>.
               </h2>
               <p className="text-slate-600 mt-4 text-base sm:text-lg leading-relaxed">
-                Start instant video meetings or schedule ahead. Generates dynamic Google Meet-style links with our domain, real-time host admission control, and encrypted audio & video.
+                Start instant video meetings or schedule ahead. Generates dynamic JUMMP Meet links with our domain, real-time host admission control, and encrypted audio & video.
               </p>
             </div>
 
-            {/* Google Meet Features Grid */}
+            {/* JUMMP Meet Features Grid */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl mx-auto mb-12">
               <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-xs hover:shadow-md transition-shadow">
                 <div className="w-12 h-12 rounded-xl bg-blue-50 text-[#0b5cff] flex items-center justify-center mb-4">
@@ -243,7 +210,7 @@ export default function LandingPage() {
                 </div>
                 <h3 className="text-lg font-bold text-[#00053d]">Dynamic Meeting Links</h3>
                 <p className="text-xs sm:text-sm text-slate-500 mt-2 leading-relaxed">
-                  Every click creates a unique Google Meet style link like <code className="text-[#0b5cff] font-mono font-bold bg-blue-50 px-1.5 py-0.5 rounded">jmp-xxxx-yyy</code> with our URL. No account needed to join.
+                  Every click creates a unique JUMMP Meet link like <code className="text-[#0b5cff] font-mono font-bold bg-blue-50 px-1.5 py-0.5 rounded">jmp-xxxx-yyy</code> with our URL. No account needed to join.
                 </p>
               </div>
 
@@ -263,14 +230,14 @@ export default function LandingPage() {
                 </div>
                 <h3 className="text-lg font-bold text-[#00053d]">Audio, Video & Screen Share</h3>
                 <p className="text-xs sm:text-sm text-slate-500 mt-2 leading-relaxed">
-                  Full Google Meet style bottom controls: mute/unmute, HD webcam feeds, display sharing, floating reactions, hand raising, and in-call chat.
+                  Full JUMMP Meet bottom controls: mute/unmute, HD webcam feeds, display sharing, floating reactions, hand raising, and in-call chat.
                 </p>
               </div>
             </div>
 
             {/* Quick Action Container */}
             <div className="max-w-2xl mx-auto p-6 rounded-3xl bg-slate-900 text-white shadow-2xl border border-slate-800 text-center">
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-wider mb-4 border border-blue-500/30">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-wider mb-4 border border-blue-500/30">
                 <Sparkles className="w-3.5 h-3.5" />
                 <span>Try JUMMP Meet Right Now</span>
               </div>
@@ -289,7 +256,7 @@ export default function LandingPage() {
         <section id="comparison" className="py-16 md:py-24 bg-slate-50/70 border-y border-slate-100">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="text-center max-w-3xl mx-auto mb-12">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
+              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-lg border border-blue-100">
                 Direct Comparison
               </span>
               <h2 className="text-3xl sm:text-4xl font-extrabold text-[#00053d] mt-3">
@@ -306,7 +273,7 @@ export default function LandingPage() {
               {/* Card 1: Standard Conferencing */}
               <div className="bg-white rounded-2xl border border-slate-200 p-6 sm:p-8 shadow-xs flex flex-col justify-between">
                 <div>
-                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-slate-600 text-xs font-bold uppercase tracking-wider mb-4">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-100 text-slate-600 text-xs font-bold uppercase tracking-wider mb-4">
                     Other Webinar Tools
                   </div>
                   <h3 className="text-xl sm:text-2xl font-bold text-slate-800">Standard Conferencing</h3>
@@ -336,11 +303,11 @@ export default function LandingPage() {
 
               {/* Card 2: JUMMP (Highlighted) */}
               <div className="bg-gradient-to-b from-blue-50/50 to-white rounded-2xl border-2 border-[#0b5cff] p-6 sm:p-8 shadow-xl flex flex-col justify-between relative">
-                <div className="absolute -top-3.5 right-6 bg-[#0b5cff] text-white text-[11px] font-extrabold uppercase tracking-wider px-3.5 py-1 rounded-full shadow-sm">
+                <div className="absolute -top-3.5 right-6 bg-[#0b5cff] text-white text-[11px] font-extrabold uppercase tracking-wider px-3.5 py-1 rounded-lg shadow-sm">
                   Recommended Choice
                 </div>
                 <div>
-                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-100 text-[#0b5cff] text-xs font-bold uppercase tracking-wider mb-4">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-blue-100 text-[#0b5cff] text-xs font-bold uppercase tracking-wider mb-4">
                     JUMMP
                   </div>
                   <h3 className="text-xl sm:text-2xl font-bold text-[#00053d]">Modern High-Scale Broadcasts</h3>
@@ -388,7 +355,7 @@ export default function LandingPage() {
         <section id="features" className="py-16 md:py-24 bg-white">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="text-center max-w-3xl mx-auto mb-16">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
+              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-lg border border-blue-100">
                 Powerful Features
               </span>
               <h2 className="text-3xl sm:text-4xl font-extrabold text-[#00053d] mt-3">
@@ -462,7 +429,7 @@ export default function LandingPage() {
         <section id="pricing" className="py-16 md:py-24 bg-slate-50/70 border-t border-slate-100">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="text-center max-w-2xl mx-auto mb-10">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
+              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-lg border border-blue-100">
                 Simple Flat Pricing
               </span>
               <h2 className="text-3xl sm:text-4xl font-extrabold text-[#00053d] mt-3">
@@ -495,7 +462,7 @@ export default function LandingPage() {
                   }`}
                 >
                   <span>Annual</span>
-                  <span className="text-[10px] uppercase font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full">
+                  <span className="text-[10px] uppercase font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md">
                     Save 20%
                   </span>
                 </button>
@@ -509,7 +476,7 @@ export default function LandingPage() {
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-xl font-bold text-slate-900">Starter Plan</h3>
-                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
+                    <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-slate-100 text-slate-700">
                       Ideal for Startups
                     </span>
                   </div>
@@ -555,13 +522,13 @@ export default function LandingPage() {
 
               {/* Professional Plan (Best Value) */}
               <div className="bg-white rounded-2xl border-2 border-[#0b5cff] p-6 sm:p-8 shadow-xl flex flex-col justify-between relative">
-                <div className="absolute -top-3 right-6 bg-[#0b5cff] text-white text-xs font-extrabold uppercase tracking-wider px-3 py-0.5 rounded-full shadow-xs">
+                <div className="absolute -top-3 right-6 bg-[#0b5cff] text-white text-xs font-extrabold uppercase tracking-wider px-3 py-0.5 rounded-md shadow-xs">
                   Best Value
                 </div>
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-xl font-bold text-[#00053d]">Professional Plan</h3>
-                    <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-blue-50 text-[#0b5cff]">
+                    <span className="text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-50 text-[#0b5cff]">
                       High Scale
                     </span>
                   </div>
@@ -620,7 +587,7 @@ export default function LandingPage() {
         <section id="faq" className="py-16 md:py-24 bg-white">
           <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="text-center mb-12">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-full border border-blue-100">
+              <span className="text-xs font-bold uppercase tracking-wider text-[#0b5cff] bg-blue-50 px-3 py-1 rounded-lg border border-blue-100">
                 FAQ
               </span>
               <h2 className="text-3xl sm:text-4xl font-extrabold text-[#00053d] mt-3">

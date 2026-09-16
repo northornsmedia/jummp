@@ -85,7 +85,7 @@ export async function checkMeetingStatus(code: string): Promise<MeetingStatusChe
     const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
     const diffMinutes = Math.floor(diffMs / (1000 * 60));
 
-    // Links inactive for more than 30 days are categorized as expired in Google Meet protocol
+    // Links inactive for more than 30 days are categorized as expired in JUMMP Meet protocol
     const isExpired = diffDays >= 30;
 
     // Active if heartbeat within last 3 minutes and not ended

@@ -22,6 +22,7 @@ import {
   saveScheduledMeeting,
   getScheduledMeetings,
   ScheduledMeeting,
+  registerCreatedMeeting,
 } from '@/lib/meetStore';
 
 interface MeetingBarProps {
@@ -60,6 +61,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
   // 1. Instant Meeting
   const handleStartInstantMeeting = () => {
     const newId = generateMeetingId();
+    registerCreatedMeeting(newId);
     setDropdownOpen(false);
     router.push(`/meet/${newId}?host=true`);
   };
@@ -67,6 +69,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
   // 2. Create Meeting for Later
   const handleCreateForLater = () => {
     const newId = generateMeetingId();
+    registerCreatedMeeting(newId);
     setGeneratedMeetingId(newId);
     setDropdownOpen(false);
     setLaterModalOpen(true);
@@ -76,6 +79,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
   // 3. Open Schedule Modal
   const handleOpenSchedule = () => {
     const newId = generateMeetingId();
+    registerCreatedMeeting(newId);
     setGeneratedMeetingId(newId);
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -119,7 +123,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
 
   return (
     <div className={`w-full max-w-2xl mx-auto ${className}`}>
-      {/* Main Google Meet Action Bar */}
+      {/* Main JUMMP Meet Action Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
         {/* New Meeting Dropdown Button */}
         <div className="relative" ref={dropdownRef}>
@@ -218,7 +222,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
               <button
                 type="button"
                 onClick={() => setLaterModalOpen(false)}
-                className="p-1 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -283,7 +287,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
               <button
                 type="button"
                 onClick={() => setScheduleModalOpen(false)}
-                className="p-1 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -333,7 +337,7 @@ export default function MeetingBar({ className = '' }: MeetingBarProps) {
                 </div>
 
                 <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-100 text-xs text-slate-600">
-                  A Google Meet-style link will be generated and saved for this event.
+                  A JUMMP Meet link will be generated and saved for this event.
                 </div>
 
                 <div className="pt-2 flex items-center justify-end gap-3">

@@ -98,7 +98,30 @@ export function getScheduledMeetings(): ScheduledMeeting[] {
   }
 }
 
-// Google Meet Tone Generator using Web Audio API
+export function registerCreatedMeeting(meetingId: string) {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem('jummp_created_meetings');
+    const list: string[] = raw ? JSON.parse(raw) : [];
+    if (!list.includes(meetingId)) {
+      list.push(meetingId);
+      localStorage.setItem('jummp_created_meetings', JSON.stringify(list.slice(-50)));
+    }
+  } catch {}
+}
+
+export function isMeetingCreator(meetingId: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = localStorage.getItem('jummp_created_meetings');
+    const list: string[] = raw ? JSON.parse(raw) : [];
+    return list.includes(meetingId);
+  } catch {
+    return false;
+  }
+}
+
+// JUMMP Meet Tone Generator using Web Audio API
 export function playChime(type: 'knock' | 'admit' | 'leave' | 'chat' | 'hand' = 'knock') {
   if (typeof window === 'undefined') return;
   try {
@@ -113,7 +136,7 @@ export function playChime(type: 'knock' | 'admit' | 'leave' | 'chat' | 'hand' = 
     const now = ctx.currentTime;
 
     if (type === 'admit') {
-      // Google Meet signature smooth rising chord
+      // JUMMP Meet signature smooth rising chord
       const freqs = [523.25, 659.25, 783.99]; // C5, E5, G5
       freqs.forEach((f, i) => {
         const osc = ctx.createOscillator();
@@ -247,6 +270,8 @@ export function createAudioVisualizer(
 export class MeetChannel {
   private channel: BroadcastChannel | null = null;
   private supabaseChannel: RealtimeChannel | null = null;
+  private isSubscribed: boolean = false;
+  private outgoingQueue: Array<{ type: string; payload: any }> = [];
 
   constructor(private meetingId: string, private onMessage: (msg: any) => void) {
     // 1. Browser BroadcastChannel for instant local tab sync
@@ -262,20 +287,48 @@ export class MeetChannel {
     // 2. Supabase Realtime channel for internet-wide real-time messaging
     try {
       this.supabaseChannel = supabase
-        .channel(`meet:${meetingId}`)
+        .channel(`meet:${meetingId}`, {
+          config: {
+            broadcast: { ack: false, self: false },
+          },
+        })
         .on('broadcast', { event: 'meet_event' }, ({ payload }) => {
           this.onMessage(payload);
         })
-        .subscribe();
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            this.isSubscribed = true;
+            this.flushQueue();
+          } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+            this.isSubscribed = false;
+          }
+        });
     } catch (e) {
       console.warn('Supabase Realtime channel init error:', e);
+    }
+  }
+
+  private flushQueue() {
+    if (!this.supabaseChannel || !this.isSubscribed) return;
+    while (this.outgoingQueue.length > 0) {
+      const item = this.outgoingQueue.shift();
+      if (item) {
+        const data = { type: item.type, payload: item.payload, meetingId: this.meetingId };
+        this.supabaseChannel.send({
+          type: 'broadcast',
+          event: 'meet_event',
+          payload: data,
+        }).catch((err) => {
+          console.warn('Error sending queued message:', err);
+        });
+      }
     }
   }
 
   send(type: string, payload: any) {
     const data = { type, payload, meetingId: this.meetingId };
 
-    // Broadcast locally
+    // Broadcast locally via BroadcastChannel
     if (this.channel) {
       try {
         this.channel.postMessage(data);
@@ -284,13 +337,21 @@ export class MeetChannel {
 
     // Broadcast globally across internet via Supabase WebSockets
     if (this.supabaseChannel) {
-      this.supabaseChannel
-        .send({
-          type: 'broadcast',
-          event: 'meet_event',
-          payload: data,
-        })
-        .catch(() => {});
+      if (this.isSubscribed) {
+        this.supabaseChannel
+          .send({
+            type: 'broadcast',
+            event: 'meet_event',
+            payload: data,
+          })
+          .catch((err) => {
+            console.warn('Send error, queuing for retry:', err);
+            this.outgoingQueue.push({ type, payload });
+          });
+      } else {
+        // Queue message until subscription handshake completes
+        this.outgoingQueue.push({ type, payload });
+      }
     }
 
     // Also use localStorage for cross-window reliability
@@ -315,5 +376,8 @@ export class MeetChannel {
       } catch {}
       this.supabaseChannel = null;
     }
+    this.isSubscribed = false;
+    this.outgoingQueue = [];
   }
 }
+

@@ -4,18 +4,13 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { Menu, X, ArrowRight, Sparkles, Bell, CheckCircle2, Video } from 'lucide-react';
-import { useViewport } from '@/hooks/useViewport';
+import { Menu, X, ArrowRight, Video } from 'lucide-react';
 import { generateMeetingId } from '@/lib/meetStore';
 
 export default function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
-  const [comingSoonModal, setComingSoonModal] = useState<{ title: string; desc: string } | null>(null);
-  const [notifyEmail, setNotifyEmail] = useState('');
-  const [notifySubmitted, setNotifySubmitted] = useState(false);
   const pathname = usePathname();
-  const { isMobile } = useViewport();
 
   useEffect(() => {
     const handleScroll = () => {
@@ -34,29 +29,8 @@ export default function Navbar() {
     { name: 'Features', href: '/#features' },
     { name: 'Comparison', href: '/#comparison' },
     { name: 'Pricing', href: '/pricing' },
-    {
-      name: 'Dashboard',
-      href: '#',
-      comingSoon: true,
-      desc: 'The all-in-one broadcast management hub, attendee analytics, and webinar studio are currently in private beta testing.',
-    },
-    {
-      name: 'Live Studio',
-      href: '#',
-      comingSoon: true,
-      desc: 'The ultra-low-latency 1080p 60fps attendee viewing stage with live chat, polls, and instant offer cards is coming soon.',
-    },
     { name: 'Docs', href: '/docs' },
   ];
-
-  const handleNavClick = (link: (typeof navLinks)[0], e: React.MouseEvent) => {
-    if (link.comingSoon) {
-      e.preventDefault();
-      setNotifySubmitted(false);
-      setNotifyEmail('');
-      setComingSoonModal({ title: link.name, desc: link.desc || '' });
-    }
-  };
 
   return (
     <>
@@ -90,7 +64,6 @@ export default function Navbar() {
                   <Link
                     key={link.name}
                     href={link.href}
-                    onClick={(e) => handleNavClick(link, e)}
                     className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors inline-flex items-center gap-1.5 ${
                       isActive
                         ? 'text-[#0b5cff] bg-blue-50/60 font-semibold'
@@ -98,11 +71,6 @@ export default function Navbar() {
                     }`}
                   >
                     <span>{link.name}</span>
-                    {link.comingSoon && (
-                      <span className="text-[10px] font-bold text-[#0b5cff] bg-blue-50 border border-blue-100 px-1.5 py-0.5 rounded-md">
-                        Coming Soon
-                      </span>
-                    )}
                   </Link>
                 );
               })}
@@ -117,7 +85,7 @@ export default function Navbar() {
                   window.location.href = `/meet/${id}?host=true`;
                 }}
                 className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-blue-200 bg-blue-50/70 text-[#0b5cff] hover:bg-blue-100 font-bold text-xs transition-colors shadow-2xs"
-                title="Start a Google Meet style instant video call"
+                title="Start an instant JUMMP Meet video call"
               >
                 <Video className="w-3.5 h-3.5" />
                 <span>Meet</span>
@@ -164,15 +132,9 @@ export default function Navbar() {
                 <Link
                   key={link.name}
                   href={link.href}
-                  onClick={(e) => handleNavClick(link, e)}
                   className="flex items-center justify-between px-3 py-2.5 rounded-lg text-base font-medium text-slate-800 hover:bg-blue-50 hover:text-[#0b5cff] transition-colors"
                 >
                   <span>{link.name}</span>
-                  {link.comingSoon && (
-                    <span className="text-[10px] font-bold text-[#0b5cff] bg-blue-50 border border-blue-100 px-2 py-0.5 rounded-md">
-                      Coming Soon
-                    </span>
-                  )}
                 </Link>
               ))}
             </div>
@@ -205,71 +167,6 @@ export default function Navbar() {
           </div>
         )}
       </header>
-
-      {/* Themed Coming Soon Popup Modal */}
-      {comingSoonModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl sm:rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl relative border border-slate-200">
-            <button
-              onClick={() => setComingSoonModal(null)}
-              className="absolute top-5 right-5 text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100"
-            >
-              ✕
-            </button>
-
-            <div className="text-center space-y-4">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-[#0b5cff] text-xs font-bold uppercase tracking-wider">
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Feature in Private Beta</span>
-              </div>
-
-              <h3 className="text-2xl sm:text-3xl font-extrabold text-[#00053d] tracking-tight">
-                {comingSoonModal.title}{' '}
-                <span className="text-[#0b5cff] underline decoration-blue-200 decoration-wavy">
-                  Coming Soon
-                </span>
-              </h3>
-
-              <p className="text-sm text-slate-600 leading-relaxed">
-                {comingSoonModal.desc}
-              </p>
-
-              {notifySubmitted ? (
-                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center justify-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>You will be the first to know when it goes live!</span>
-                </div>
-              ) : (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (notifyEmail) setNotifySubmitted(true);
-                  }}
-                  className="space-y-2.5 pt-2"
-                >
-                  <div className="relative">
-                    <Bell className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                    <input
-                      type="email"
-                      required
-                      value={notifyEmail}
-                      onChange={(e) => setNotifyEmail(e.target.value)}
-                      placeholder="Enter email for VIP early access"
-                      className="w-full pl-10 pr-3 py-2.5 rounded-xl border border-slate-200 text-xs focus:border-[#0b5cff] outline-none"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    className="w-full py-2.5 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-xs shadow-sm transition-all"
-                  >
-                    Notify Me on Launch
-                  </button>
-                </form>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }

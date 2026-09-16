@@ -23,6 +23,7 @@ import {
   UserX,
   Volume2,
   Shield,
+  ShieldCheck,
   ArrowLeft,
   Settings,
   MoreVertical,
@@ -38,6 +39,12 @@ import {
   Maximize2,
   Minimize2,
   CheckCircle2,
+  Disc,
+  Download,
+  Pause,
+  Square,
+  Circle,
+  X,
 } from 'lucide-react';
 import {
   MeetChannel,
@@ -49,6 +56,8 @@ import {
   formatTimeAgo,
   createAudioVisualizer,
   generateMeetingId,
+  isMeetingCreator,
+  registerCreatedMeeting,
 } from '@/lib/meetStore';
 import {
   createOrGetMeeting,
@@ -85,11 +94,25 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [micEnabled, setMicEnabled] = useState(true);
   const [camEnabled, setCamEnabled] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [activeScreenSharer, setActiveScreenSharer] = useState<string | null>(null);
+  const [screenShareError, setScreenShareError] = useState<string | null>(null);
   const [handRaised, setHandRaised] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [audioVolume, setAudioVolume] = useState(0); // 0-100 live voice volume
   const [isResyncing, setIsResyncing] = useState(false);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+
+  // Browser-Side Recording State (MediaRecorder)
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPausedRecording, setIsPausedRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
+  const [recordedUrl, setRecordedUrl] = useState<string | null>(null);
+  const [showRecordingModal, setShowRecordingModal] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
 
   // Video Refs & Streams
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -122,6 +145,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [copied, setCopied] = useState(false);
   const [unreadChat, setUnreadChat] = useState(false);
   const [isMinimizedPip, setIsMinimizedPip] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Google Meet / Apple Floating Toast Notification
+  const [toastNotification, setToastNotification] = useState<{
+    id: string;
+    title: string;
+    subtitle?: string;
+    type?: 'chat' | 'user' | 'info';
+  } | null>(null);
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const showToast = useCallback((title: string, subtitle?: string, type: 'chat' | 'user' | 'info' = 'info') => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToastNotification({ id: Date.now().toString(), title, subtitle, type });
+    toastTimeoutRef.current = setTimeout(() => {
+      setToastNotification(null);
+    }, 3800);
+  }, []);
 
   const channelRef = useRef<MeetChannel | null>(null);
 
@@ -138,9 +179,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       setStatusCheck(check);
       setIsCheckingStatus(false);
 
+      // Auto-recognize meeting creator as Host without requiring login
+      const creator = isMeetingCreator(meetingId);
+      if (isHostQuery || creator) {
+        setIsHost(true);
+      }
+
       // If link is valid or ready, register/update in Supabase
       if (!check.isExpired) {
-        const meeting = await createOrGetMeeting(meetingId, isHostQuery ? 'Host' : 'Guest');
+        const meeting = await createOrGetMeeting(meetingId, isHostQuery || creator ? 'Host' : 'Guest');
         if (meeting && isMounted) {
           setDbMeeting(meeting);
           const messages = await getMeetingMessages(meeting.id);
@@ -169,6 +216,155 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   useEffect(() => {
     localStreamRef.current = localStream;
   }, [localStream]);
+
+  // =========================================================================
+  // BROWSER-SIDE MEDIA RECORDER (Apple-Grade Client Video & Audio Recording)
+  // =========================================================================
+  const startBrowserRecording = async () => {
+    try {
+      // Capture display / tab with audio
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: 'browser' } as any,
+        audio: true,
+      });
+
+      // Mix mic audio if active
+      const audioTracks: MediaStreamTrack[] = [];
+      const displayAudio = displayStream.getAudioTracks()[0];
+      if (displayAudio) audioTracks.push(displayAudio);
+
+      if (localStreamRef.current && micEnabled) {
+        const micAudio = localStreamRef.current.getAudioTracks()[0];
+        if (micAudio) audioTracks.push(micAudio);
+      }
+
+      let combinedStream: MediaStream;
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (audioTracks.length > 1 && AudioContextClass) {
+        try {
+          const ctx = new AudioContextClass();
+          const dest = ctx.createMediaStreamDestination();
+          audioTracks.forEach((t) => {
+            const trackStream = new MediaStream([t]);
+            const source = ctx.createMediaStreamSource(trackStream);
+            source.connect(dest);
+          });
+          combinedStream = new MediaStream([
+            displayStream.getVideoTracks()[0],
+            ...dest.stream.getAudioTracks(),
+          ]);
+        } catch {
+          combinedStream = displayStream;
+        }
+      } else {
+        combinedStream = displayStream;
+      }
+
+      recordingStreamRef.current = displayStream;
+      recordingChunksRef.current = [];
+
+      let mimeType = 'video/webm;codecs=vp9,opus';
+      if (typeof MediaRecorder !== 'undefined') {
+        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8,opus';
+        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
+        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = '';
+      }
+
+      const recorder = mimeType
+        ? new MediaRecorder(combinedStream, { mimeType })
+        : new MediaRecorder(combinedStream);
+
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          recordingChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(recordingChunksRef.current, {
+          type: recorder.mimeType || 'video/webm',
+        });
+        const url = URL.createObjectURL(blob);
+        setRecordedBlob(blob);
+        setRecordedUrl(url);
+        setShowRecordingModal(true);
+        setIsRecording(false);
+        setIsPausedRecording(false);
+        if (recordingTimerRef.current) {
+          clearInterval(recordingTimerRef.current);
+          recordingTimerRef.current = null;
+        }
+        if (recordingStreamRef.current) {
+          recordingStreamRef.current.getTracks().forEach((t) => t.stop());
+          recordingStreamRef.current = null;
+        }
+      };
+
+      // Native browser pill stop trigger
+      displayStream.getVideoTracks()[0].onended = () => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      };
+
+      recorder.start(1000);
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+      setIsPausedRecording(false);
+      setRecordingSeconds(0);
+
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingSeconds((sec) => sec + 1);
+      }, 1000);
+    } catch (err) {
+      console.warn('Browser recording cancelled or failed:', err);
+    }
+  };
+
+  const pauseBrowserRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.pause();
+      setIsPausedRecording(true);
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+    }
+  };
+
+  const resumeBrowserRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+      mediaRecorderRef.current.resume();
+      setIsPausedRecording(false);
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingSeconds((sec) => sec + 1);
+      }, 1000);
+    }
+  };
+
+  const stopBrowserRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  const downloadRecording = () => {
+    if (!recordedUrl) return;
+    const a = document.createElement('a');
+    a.href = recordedUrl;
+    a.download = `JUMMP-Recording-${meetingId}-${new Date().toISOString().slice(0, 10)}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const formatTimer = (totalSec: number) => {
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
 
   // =========================================================================
   // 2. IN-CALL HEARTBEAT (Keeps room alive and tracks activity in Supabase)
@@ -497,6 +693,21 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
   }, [inCall, localStream]);
 
+  // Update screen share video ref reliably when screenStream or isScreenSharing changes
+  useEffect(() => {
+    if (screenShareVideoRef.current && screenStream) {
+      screenShareVideoRef.current.srcObject = screenStream;
+      screenShareVideoRef.current.play().catch(() => {});
+    }
+  }, [screenStream, isScreenSharing]);
+
+  // Auto-scroll chat panel to latest message
+  useEffect(() => {
+    if (activePanel === 'chat') {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, activePanel]);
+
   // =========================================================================
   // 7. WEBRTC P2P FALLBACK (Zero-config peer mesh)
   // =========================================================================
@@ -592,23 +803,40 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'CHAT_MESSAGE') {
         setChatMessages((prev) => [...prev, msg.payload]);
         playChime('chat');
-        if (activePanel !== 'chat') setUnreadChat(true);
+        if (activePanel !== 'chat') {
+          setUnreadChat(true);
+          showToast(msg.payload.sender, msg.payload.text, 'chat');
+        }
       } else if (msg.type === 'REACTION') {
         triggerReaction(msg.payload.emoji, false);
+      } else if (msg.type === 'SCREEN_SHARE_STARTED') {
+        const sharer = msg.payload?.sharerName;
+        setActiveScreenSharer(sharer);
+        // Enforce one screen share at a time: if we are presenting and another starts, stop ours
+        if (isScreenSharing && sharer !== (userName || (isHost ? 'Host' : 'Guest'))) {
+          if (screenStream) {
+            screenStream.getTracks().forEach((t) => t.stop());
+          }
+          setScreenStream(null);
+          setIsScreenSharing(false);
+        }
+      } else if (msg.type === 'SCREEN_SHARE_STOPPED') {
+        setActiveScreenSharer(null);
       } else if (msg.type === 'USER_JOINED') {
         playChime('admit');
         setParticipants((prev) => [
           ...prev.filter((p) => p.name !== msg.payload.name),
           msg.payload,
         ]);
+        showToast('Participant Joined', `${msg.payload.name} entered the call`, 'user');
 
-        if (isHost && inCall && msg.payload.name !== userName) {
+        if (inCall && msg.payload.name !== userName) {
           try {
             const pc = createPeerConnection(msg.payload.name);
             const offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
             channelRef.current?.send('WEBRTC_SIGNAL', {
-              from: userName || 'Host',
+              from: userName || (isHost ? 'Host' : 'Guest'),
               to: msg.payload.name,
               type: 'offer',
               sdp: offer,
@@ -620,6 +848,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'USER_LEFT') {
         playChime('leave');
         setParticipants((prev) => prev.filter((p) => p.name !== msg.payload.name));
+        showToast('Participant Left', `${msg.payload.name} left the room`, 'user');
         if (peerConnectionsRef.current[msg.payload.name]) {
           peerConnectionsRef.current[msg.payload.name].close();
           delete peerConnectionsRef.current[msg.payload.name];
@@ -631,13 +860,13 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         });
       } else if (msg.type === 'PEER_RESYNC') {
         // A peer just returned from another app / lock screen
-        if (isHost && inCall && msg.payload.name !== userName) {
+        if (inCall && msg.payload.name !== userName) {
           try {
             const pc = createPeerConnection(msg.payload.name);
             const offer = await pc.createOffer({ iceRestart: true });
             await pc.setLocalDescription(offer);
             channelRef.current?.send('WEBRTC_SIGNAL', {
-              from: userName || 'Host',
+              from: userName || (isHost ? 'Host' : 'Guest'),
               to: msg.payload.name,
               type: 'offer',
               sdp: offer,
@@ -698,11 +927,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // Toggle Camera
   const toggleCam = () => {
     const nextState = !camEnabled;
-    if (localStream) {
-      localStream.getVideoTracks().forEach((t) => (t.enabled = nextState));
-      setCamEnabled(nextState);
-    } else {
-      setCamEnabled(nextState);
+    setCamEnabled(nextState);
+    if (localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach((t) => {
+        t.enabled = nextState;
+      });
     }
     if (livekitRoomRef.current) {
       livekitRoomRef.current.localParticipant.setCameraEnabled(nextState).catch(() => {});
@@ -712,11 +941,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // Toggle Mic
   const toggleMic = () => {
     const nextState = !micEnabled;
-    if (localStream) {
-      localStream.getAudioTracks().forEach((t) => (t.enabled = nextState));
-      setMicEnabled(nextState);
-    } else {
-      setMicEnabled(nextState);
+    setMicEnabled(nextState);
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach((t) => {
+        t.enabled = nextState;
+      });
     }
     if (livekitRoomRef.current) {
       livekitRoomRef.current.localParticipant.setMicrophoneEnabled(nextState).catch(() => {});
@@ -725,29 +954,44 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Screen Sharing
   const toggleScreenShare = async () => {
+    const myName = userName || (isHost ? 'Host' : 'Guest');
+
     if (isScreenSharing) {
       if (screenStream) {
         screenStream.getTracks().forEach((t) => t.stop());
-        setScreenStream(null);
       }
+      setScreenStream(null);
       setIsScreenSharing(false);
+      setActiveScreenSharer(null);
+      channelRef.current?.send('SCREEN_SHARE_STOPPED', { sharerName: myName });
       if (livekitRoomRef.current) {
         livekitRoomRef.current.localParticipant.setScreenShareEnabled(false).catch(() => {});
       }
     } else {
+      // Enforce one screen share at a time
+      if (activeScreenSharer && activeScreenSharer !== myName) {
+        setScreenShareError(`${activeScreenSharer} is currently presenting. Only one person can share at a time.`);
+        setTimeout(() => setScreenShareError(null), 4000);
+        return;
+      }
+
       try {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         setScreenStream(stream);
         setIsScreenSharing(true);
-        if (screenShareVideoRef.current) {
-          screenShareVideoRef.current.srcObject = stream;
-        }
+        setActiveScreenSharer(myName);
+        channelRef.current?.send('SCREEN_SHARE_STARTED', { sharerName: myName });
+
         if (livekitRoomRef.current) {
-          livekitRoomRef.current.localParticipant.setScreenShareEnabled(true).catch(() => {});
+          const videoTrack = stream.getVideoTracks()[0];
+          if (videoTrack) await livekitRoomRef.current.localParticipant.publishTrack(videoTrack);
         }
+
         stream.getVideoTracks()[0].onended = () => {
           setIsScreenSharing(false);
           setScreenStream(null);
+          setActiveScreenSharer(null);
+          channelRef.current?.send('SCREEN_SHARE_STOPPED', { sharerName: myName });
           if (livekitRoomRef.current) {
             livekitRoomRef.current.localParticipant.setScreenShareEnabled(false).catch(() => {});
           }
@@ -771,26 +1015,35 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   // Join Action
-  const handleJoinClick = () => {
+  const handleJoinClick = (directBypass = false) => {
     const name = userName.trim() || (isHost ? 'Host' : 'Guest User');
     setUserName(name);
 
-    if (isHost) {
+    // If host, directBypass, or no host is currently in meeting:
+    if (isHost || directBypass || !hostInMeeting) {
       playChime('admit');
+      setWaitingToJoin(false);
       setInCall(true);
-      const hostParticipant: Participant = {
-        id: 'host-' + Date.now(),
+      const shouldBeHost = isHost || !hostInMeeting;
+      if (shouldBeHost && !isHost) {
+        setIsHost(true);
+        registerCreatedMeeting(meetingId);
+      }
+      const participant: Participant = {
+        id: (shouldBeHost ? 'host-' : 'guest-') + Date.now(),
         name,
-        isHost: true,
+        isHost: shouldBeHost,
         audioEnabled: micEnabled,
         videoEnabled: camEnabled,
         handRaised: false,
         isScreenSharing: false,
         joinedAt: Date.now(),
       };
-      setParticipants([hostParticipant]);
-      channelRef.current?.send('HOST_ARRIVED', { hostName: name });
-      channelRef.current?.send('USER_JOINED', hostParticipant);
+      setParticipants((prev) => [...prev.filter((p) => p.name !== name), participant]);
+      if (shouldBeHost) {
+        channelRef.current?.send('HOST_ARRIVED', { hostName: name });
+      }
+      channelRef.current?.send('USER_JOINED', participant);
     } else {
       playChime('knock');
       setWaitingToJoin(true);
@@ -829,8 +1082,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   // Send Chat Message
-  const handleSendChat = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSendChat = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!newChatText.trim()) return;
     const msg: ChatMessage = {
       id: Date.now().toString(),
@@ -902,19 +1155,64 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   // =========================================================================
   if (isCheckingStatus) {
     return (
-      <div className="h-[100dvh] bg-slate-950 text-white flex flex-col items-center justify-center p-4 selection:bg-blue-500/30">
-        <div className="w-12 h-12 rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 mb-4 animate-pulse">
-          <Sparkles className="w-6 h-6 animate-spin" />
+      <div className="h-[100dvh] bg-gradient-to-b from-[#030712] via-[#08122a] to-[#030712] text-white flex flex-col items-center justify-between p-6 selection:bg-blue-500/30 relative overflow-hidden">
+        {/* Background ambient glow */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-blue-600/15 rounded-full blur-3xl pointer-events-none" />
+
+        {/* Top Header */}
+        <div className="w-full max-w-4xl flex items-center justify-between z-10">
+          <div className="relative h-8 w-28">
+            <Image src="/assets/jummp-logo.png" alt="JUMMP" fill priority className="object-contain object-left" />
+          </div>
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-xs text-slate-300 font-mono">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span>{meetingId}</span>
+          </div>
         </div>
-        <h3 className="text-base font-bold text-white">Connecting to JUMMP Meet</h3>
-        <p className="text-xs text-slate-400 mt-1 font-mono">{meetingId}</p>
+
+        {/* Center Card */}
+        <div className="max-w-md w-full p-8 rounded-3xl bg-white/[0.04] border border-white/10 backdrop-blur-xl shadow-2xl flex flex-col items-center text-center space-y-6 z-10 animate-in fade-in zoom-in-95 duration-300">
+          <div className="relative">
+            <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-xl shadow-blue-500/30">
+              <Video className="w-9 h-9 animate-pulse" />
+            </div>
+            <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-emerald-500 border-2 border-[#08122a] flex items-center justify-center">
+              <div className="w-2 h-2 rounded-full bg-white animate-ping" />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <h3 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+              Connecting to JUMMP Meet
+            </h3>
+            <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-xs mx-auto">
+              Setting up encrypted WebRTC media streams and room signaling...
+            </p>
+          </div>
+
+          <div className="w-full max-w-xs">
+            <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-blue-500 to-emerald-400 rounded-full w-2/3 animate-pulse" />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 text-[11px] text-slate-400 font-medium">
+            <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+            <span>Encrypted Room • High Fidelity Audio & Video</span>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="text-center text-xs text-slate-500 z-10">
+          JUMMP Meet • Instant Video Calling
+        </div>
       </div>
     );
   }
 
   // =========================================================================
   // VIEW 1: EXPIRED MEETING SCREEN (When clicked after weeks of inactivity)
-  // Google Meet Level Lifecycle Handling
+  // JUMMP Meet Lifecycle Handling
   // =========================================================================
   if (statusCheck?.isExpired) {
     return (
@@ -936,7 +1234,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           </div>
 
           <div className="space-y-2">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/20 text-[11px] font-semibold text-amber-400">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/20 text-[11px] font-semibold text-amber-400">
               <AlertCircle className="w-3.5 h-3.5" />
               <span>Link Expired</span>
             </div>
@@ -944,7 +1242,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               This meeting link has expired
             </h2>
             <p className="text-xs sm:text-sm text-slate-400 leading-relaxed max-w-sm mx-auto">
-              Per Google Meet protocol, inactive links expire after 30 days. This room was inactive for{' '}
+              Per JUMMP Meet protocol, inactive links expire after 30 days. This room was inactive for{' '}
               <span className="text-white font-semibold">{statusCheck.daysInactive} days</span>.
             </p>
           </div>
@@ -982,7 +1280,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </main>
 
         <footer className="p-3.5 text-center text-xs text-slate-500 border-t border-slate-900">
-          JUMMP Meet • Google Meet Protocol
+          JUMMP Meet • Secure Protocol
         </footer>
       </div>
     );
@@ -1044,14 +1342,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </main>
 
         <footer className="p-3.5 text-center text-xs text-slate-500 border-t border-slate-900">
-          JUMMP Meet • Google Meet Protocol
+          JUMMP Meet • Secure Protocol
         </footer>
       </div>
     );
   }
 
   // =========================================================================
-  // VIEW 3: GOOGLE MEET GREEN ROOM / PRE-JOIN LOBBY (Mobile Viewport Masterpiece)
+  // VIEW 3: JUMMP MEET GREEN ROOM / PRE-JOIN LOBBY (Mobile Viewport Masterpiece)
   // =========================================================================
   if (!inCall) {
     return (
@@ -1111,7 +1409,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
               {/* Real-time Voice Audio Visualizer Wave */}
               {micEnabled && audioVolume > 5 && (
-                <div className="absolute top-4 left-4 flex items-center gap-1 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10 text-emerald-400 text-xs font-medium animate-in fade-in">
+                <div className="absolute top-4 left-4 flex items-center gap-1.5 bg-slate-950/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-white/10 text-emerald-400 text-xs font-medium animate-in fade-in">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                   <span className="text-[10px] uppercase tracking-wider font-bold">Speaking</span>
                   <div className="flex items-end gap-0.5 h-3 ml-1">
@@ -1123,11 +1421,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               )}
 
               {/* Floating Bottom Media Toggles */}
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-slate-950/80 backdrop-blur-xl px-4 py-2 rounded-full border border-white/10 shadow-2xl">
+              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2.5 bg-slate-950/80 backdrop-blur-xl px-3.5 py-2 rounded-2xl border border-white/10 shadow-2xl">
                 <button
                   type="button"
                   onClick={toggleMic}
-                  className={`p-3 rounded-full transition-all active:scale-90 ${
+                  className={`p-3 rounded-xl transition-all active:scale-95 ${
                     micEnabled
                       ? 'bg-slate-800 hover:bg-slate-700 text-white'
                       : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
@@ -1140,7 +1438,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <button
                   type="button"
                   onClick={toggleCam}
-                  className={`p-3 rounded-full transition-all active:scale-90 ${
+                  className={`p-3 rounded-xl transition-all active:scale-95 ${
                     camEnabled
                       ? 'bg-slate-800 hover:bg-slate-700 text-white'
                       : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
@@ -1153,7 +1451,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <button
                   type="button"
                   onClick={switchCamera}
-                  className="p-3 rounded-full bg-slate-800 hover:bg-slate-700 text-white transition-all active:scale-90"
+                  className="p-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white transition-all active:scale-95"
                   title="Flip camera (front / back)"
                 >
                   <SwitchCamera className="w-5 h-5" />
@@ -1175,7 +1473,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           <div className="w-full md:w-2/5 space-y-4 sm:space-y-6 text-center md:text-left">
             <div>
               {/* Presence Pill */}
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-xs text-slate-400 mb-2.5">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-400 mb-2.5">
                 <Users className="w-3.5 h-3.5 text-blue-400" />
                 <span>
                   {participants.length > 0
@@ -1190,8 +1488,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               </h2>
               <p className="text-xs sm:text-sm text-slate-400 mt-1">
                 {isHost
-                  ? 'You are entering as host. You have full admission controls.'
-                  : 'Enter your name to ask the host for permission to join.'}
+                  ? 'You are entering as host. You have full controls.'
+                  : 'Start or join this call directly with instant HD audio and video.'}
               </p>
             </div>
 
@@ -1211,13 +1509,20 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="w-10 h-10 rounded-full border-3 border-blue-500 border-t-transparent animate-spin mx-auto" />
                 <h4 className="text-sm font-bold text-white">Asking to join...</h4>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  You’ll join automatically as soon as the host admits you.
+                  Waiting for host approval, or jump right into the room now.
                 </p>
-                <div className="pt-1">
+                <div className="pt-2 flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleJoinClick(true)}
+                    className="w-full py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-md transition-all"
+                  >
+                    Join Room Directly (Open Access)
+                  </button>
                   <button
                     type="button"
                     onClick={() => setWaitingToJoin(false)}
-                    className="text-xs text-slate-400 hover:text-white underline transition-colors"
+                    className="text-xs text-slate-400 hover:text-white underline transition-colors pt-1"
                   >
                     Cancel request
                   </button>
@@ -1241,7 +1546,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="space-y-2.5 pt-1">
                   <button
                     type="button"
-                    onClick={handleJoinClick}
+                    onClick={() => handleJoinClick(false)}
                     className="w-full py-3.5 px-4 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-sm shadow-xl shadow-blue-500/25 transition-all flex items-center justify-center gap-2"
                   >
                     <span>{isHost ? 'Join now' : 'Ask to join'}</span>
@@ -1262,22 +1567,22 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </main>
 
         <footer className="p-3.5 text-center text-xs text-slate-500 border-t border-slate-900 shrink-0">
-          Encrypted with Google-grade WebRTC • JUMMP Meet
+          Encrypted with Enterprise WebRTC • JUMMP Meet
         </footer>
       </div>
     );
   }
 
   // =========================================================================
-  // VIEW 4: ACTIVE IN-CALL GOOGLE MEET EXPERIENCE (Mobile Viewport Masterpiece)
+  // VIEW 4: ACTIVE IN-CALL JUMMP MEET EXPERIENCE (Mobile Viewport Masterpiece)
   // =========================================================================
   const otherParticipants = participants.filter((p) => p.name !== userName);
 
   return (
     <div className="h-[100dvh] min-h-[100dvh] bg-slate-950 text-white flex flex-col overflow-hidden select-none relative">
-      {/* BACKGROUND RESYNC BANNER (App switching recovery pill) */}
+      {/* BACKGROUND RESYNC BANNER (App switching recovery banner) */}
       {isResyncing && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 bg-blue-600/90 backdrop-blur-md px-4 py-1.5 rounded-full text-xs font-semibold text-white shadow-xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 bg-blue-600/90 backdrop-blur-md px-4 py-2 rounded-xl text-xs font-semibold text-white shadow-xl flex items-center gap-2 animate-in fade-in slide-in-from-top-2 border border-blue-400/30">
           <RefreshCw className="w-3.5 h-3.5 animate-spin" />
           <span>Restoring audio & video connection...</span>
         </div>
@@ -1285,7 +1590,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
       {/* AUTOPLAY BLOCKED BANNER (If mobile browser paused media) */}
       {autoplayBlocked && (
-        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 bg-amber-500/90 backdrop-blur-md px-4 py-2 rounded-full text-xs font-bold text-slate-950 shadow-2xl flex items-center gap-2 animate-bounce">
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 bg-amber-500/90 backdrop-blur-md px-4 py-2 rounded-xl text-xs font-bold text-slate-950 shadow-2xl flex items-center gap-2 animate-bounce border border-amber-400/40">
           <Play className="w-4 h-4 fill-current" />
           <button type="button" onClick={handleUserGestureResume} className="underline">
             Tap to resume media playback
@@ -1310,9 +1615,46 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-slate-500" />}
           </button>
           {isHost && (
-            <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400 border border-blue-500/30">
+            <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-400 border border-blue-500/30">
               Host
             </span>
+          )}
+
+          {/* Apple-style Active Recording Indicator */}
+          {isRecording && (
+            <div className="flex items-center gap-1.5 sm:gap-2 bg-red-950/80 border border-red-500/40 text-red-300 px-2.5 py-1 rounded-xl shadow-md text-xs">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="font-mono font-bold tracking-wider text-[11px] sm:text-xs">
+                {isPausedRecording ? 'PAUSED' : formatTimer(recordingSeconds)}
+              </span>
+              {isPausedRecording ? (
+                <button
+                  type="button"
+                  onClick={resumeBrowserRecording}
+                  className="p-1 rounded-md bg-red-900/60 hover:bg-red-800 text-white transition-colors"
+                  title="Resume recording"
+                >
+                  <Play className="w-2.5 h-2.5 fill-white" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={pauseBrowserRecording}
+                  className="p-1 rounded-md bg-red-900/60 hover:bg-red-800 text-white transition-colors"
+                  title="Pause recording"
+                >
+                  <Pause className="w-2.5 h-2.5" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={stopBrowserRecording}
+                className="p-1 rounded-md bg-red-600 hover:bg-red-500 text-white transition-colors"
+                title="Stop and save recording"
+              >
+                <Square className="w-2.5 h-2.5 fill-white" />
+              </button>
+            </div>
           )}
         </div>
 
@@ -1340,7 +1682,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <div className="absolute top-3 left-1/2 -translate-x-1/2 z-40 w-full max-w-md px-3 animate-in slide-in-from-top-4 duration-200">
               <div className="bg-slate-900/95 backdrop-blur-xl border border-blue-500/50 rounded-2xl p-3.5 shadow-2xl flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5 truncate">
-                  <div className="w-9 h-9 rounded-full bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
+                  <div className="w-9 h-9 rounded-xl bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
                     <Users className="w-4 h-4" />
                   </div>
                   <div className="truncate">
@@ -1368,66 +1710,85 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </div>
           )}
 
-          {/* Screen Share Tile */}
-          {isScreenSharing && (
-            <div className="w-full max-w-4xl aspect-video rounded-2xl bg-black border border-slate-800 overflow-hidden shadow-2xl relative mb-3">
-              <video ref={screenShareVideoRef} autoPlay playsInline className="w-full h-full object-contain" />
-              <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur-md px-3 py-1 rounded-lg text-xs font-semibold text-white">
-                You are presenting your screen
-              </div>
+          {/* SCREEN SHARE COLLISION ERROR BANNER */}
+          {screenShareError && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-amber-500/95 backdrop-blur-md text-slate-950 font-bold text-xs px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 border border-amber-400 animate-in fade-in slide-in-from-top-2">
+              <AlertCircle className="w-4 h-4 text-slate-950" />
+              <span>{screenShareError}</span>
             </div>
           )}
 
-          {/* DYNAMIC GOOGLE MEET MOBILE VIDEO GRID */}
-          <div
-            className={`w-full h-full flex-1 grid gap-2 sm:gap-4 items-center justify-center ${
-              otherParticipants.length === 0
-                ? 'grid-cols-1'
-                : otherParticipants.length === 1
-                ? 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
-                : 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
-            }`}
-          >
-            {/* Solo Mode with Floating Self-View PiP */}
-            {otherParticipants.length === 0 ? (
-              <div className="relative w-full h-full max-w-4xl aspect-[3/4] sm:aspect-video rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-2xl flex items-center justify-center">
-                {camEnabled ? (
-                  <video
-                    ref={inCallVideoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="w-full h-full object-cover transform -scale-x-100"
-                  />
+          {/* GOOGLE MEET / APPLE FLOATING TOAST NOTIFICATION */}
+          {toastNotification && (
+            <div
+              onClick={() => {
+                if (toastNotification.type === 'chat') {
+                  setActivePanel('chat');
+                  setUnreadChat(false);
+                }
+                setToastNotification(null);
+              }}
+              className="absolute top-4 left-1/2 -translate-x-1/2 z-50 max-w-sm w-auto px-4 py-2.5 rounded-2xl bg-slate-900/95 backdrop-blur-xl border border-white/15 shadow-2xl flex items-center gap-3 text-xs text-white cursor-pointer hover:bg-slate-800/95 transition-all animate-in fade-in slide-in-from-top-3 duration-200"
+            >
+              <div className="w-7 h-7 rounded-xl bg-blue-600/30 border border-blue-500/40 flex items-center justify-center text-blue-400 shrink-0">
+                {toastNotification.type === 'chat' ? (
+                  <MessageSquare className="w-3.5 h-3.5" />
                 ) : (
-                  <div className="w-24 h-24 rounded-full bg-blue-600 text-white text-3xl font-bold flex items-center justify-center shadow-2xl">
-                    {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
-                  </div>
-                )}
-
-                {/* Bottom Tag */}
-                <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-3 py-1 rounded-xl text-xs font-medium border border-white/10">
-                  <span>{userName || 'You'} (You)</span>
-                  {!micEnabled && <MicOff className="w-3.5 h-3.5 text-red-400" />}
-                </div>
-
-                {/* Waiting Banner for Solo User */}
-                <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-900/80 backdrop-blur-md border border-white/10 px-3.5 py-1.5 rounded-full text-xs text-slate-300 flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  <span>Waiting for others to join</span>
-                </div>
-
-                {handRaised && (
-                  <div className="absolute top-4 right-4 bg-amber-500 text-slate-950 p-2 rounded-full shadow-lg animate-bounce">
-                    <Hand className="w-5 h-5" />
-                  </div>
+                  <Users className="w-3.5 h-3.5" />
                 )}
               </div>
-            ) : (
-              // Multi-Participant Grid
-              <>
-                {/* Local User Tile */}
-                <div className="relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-lg flex items-center justify-center">
+              <div className="truncate">
+                <span className="font-bold text-white mr-1.5">{toastNotification.title}:</span>
+                <span className="text-slate-300 truncate">{toastNotification.subtitle}</span>
+              </div>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setToastNotification(null);
+                }}
+                className="text-slate-400 hover:text-white text-xs p-1"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {isScreenSharing ? (
+            /* ========================================================= */
+            /* GOOGLE MEET STYLE SIDE-BY-SIDE PRESENTATION STAGE */
+            /* ========================================================= */
+            <div className="flex-1 w-full h-full flex flex-col lg:flex-row gap-3 sm:gap-4 overflow-hidden p-1 sm:p-2">
+              {/* Left/Center Stage: Screen Presentation */}
+              <div className="flex-1 h-full min-h-[280px] bg-black rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
+                <video
+                  ref={screenShareVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-contain bg-black"
+                />
+                {/* Overlay Top Bar */}
+                <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
+                  <div className="bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
+                    <MonitorUp className="w-4 h-4 text-blue-400" />
+                    <span>You are presenting to everyone</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={toggleScreenShare}
+                    className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 pointer-events-auto transition-all active:scale-95 flex items-center gap-1.5"
+                  >
+                    <Square className="w-3 h-3 fill-current" />
+                    <span>Stop presenting</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Right Sidebar: Participant Video Feeds */}
+              <div className="w-full lg:w-72 xl:w-80 flex lg:flex-col flex-row gap-2.5 overflow-x-auto lg:overflow-y-auto shrink-0 max-h-full">
+                {/* Local User Self-View Tile */}
+                <div className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center">
                   {camEnabled ? (
                     <video
                       ref={inCallVideoRef}
@@ -1437,29 +1798,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       className="w-full h-full object-cover transform -scale-x-100"
                     />
                   ) : (
-                    <div className="w-16 h-16 rounded-full bg-blue-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                    <div className="w-12 h-12 rounded-2xl bg-blue-600 text-white text-lg font-bold flex items-center justify-center shadow-lg">
                       {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
                     </div>
                   )}
-                  <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
-                    <span>{userName || 'You'}</span>
+                  <div className="absolute bottom-2 left-2 flex items-center gap-1.5 bg-slate-950/80 backdrop-blur-md px-2 py-0.5 rounded-lg text-[11px] font-medium border border-white/10">
+                    <span>{userName || 'You'} (You)</span>
                     {!micEnabled && <MicOff className="w-3 h-3 text-red-400" />}
                   </div>
-                  {handRaised && (
-                    <div className="absolute top-2.5 right-2.5 bg-amber-500 text-slate-950 p-1.5 rounded-full shadow-md animate-bounce">
-                      <Hand className="w-4 h-4" />
-                    </div>
-                  )}
                 </div>
 
-                {/* Remote Participant Tiles */}
+                {/* Other Remote Participants */}
                 {otherParticipants.map((participant) => {
                   const remoteStream = remoteStreams[participant.name];
-
                   return (
                     <div
                       key={participant.id}
-                      className="relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-lg flex items-center justify-center"
+                      className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center"
                     >
                       {remoteStream ? (
                         <video
@@ -1474,29 +1829,190 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           }}
                         />
                       ) : (
-                        <div className="flex flex-col items-center gap-2">
-                          <div className="w-16 h-16 rounded-full bg-indigo-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                        <div className="flex flex-col items-center gap-1.5">
+                          <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white text-base font-bold flex items-center justify-center shadow-lg">
                             {participant.name.slice(0, 2).toUpperCase()}
                           </div>
-                          <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                            <span>Connected</span>
-                          </div>
+                          <span className="text-[10px] text-slate-400">Connected</span>
                         </div>
                       )}
-
-                      <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
+                      <div className="absolute bottom-2 left-2 flex items-center gap-1.5 bg-slate-950/80 backdrop-blur-md px-2 py-0.5 rounded-lg text-[11px] font-medium border border-white/10">
                         <span>{participant.name}</span>
                         {participant.isHost && (
-                          <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
+                          <span className="text-[9px] text-blue-400 font-bold uppercase">Host</span>
                         )}
                       </div>
                     </div>
                   );
                 })}
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+          ) : (
+            /* ========================================================= */
+            /* DYNAMIC JUMMP MEET PARTICIPANT GRID (Unlimited users) */
+            /* ========================================================= */
+            <div
+              className={`w-full h-full flex-1 grid gap-2 sm:gap-4 items-center justify-center overflow-y-auto p-1 ${
+                otherParticipants.length === 0
+                  ? 'grid-cols-1 max-w-4xl'
+                  : otherParticipants.length === 1
+                  ? 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
+                  : otherParticipants.length <= 3
+                  ? 'grid-cols-1 sm:grid-cols-2 max-w-5xl'
+                  : otherParticipants.length <= 5
+                  ? 'grid-cols-2 sm:grid-cols-3 max-w-6xl'
+                  : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 max-w-7xl'
+              }`}
+            >
+              {/* Solo Mode with Waiting Tag & Quick Invite */}
+              {otherParticipants.length === 0 ? (
+                <div
+                  className={`relative w-full h-full max-w-4xl aspect-[3/4] sm:aspect-video rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-300 ${
+                    micEnabled && audioVolume > 15
+                      ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
+                      : 'border-slate-800/80'
+                  }`}
+                >
+                  {camEnabled ? (
+                    <video
+                      ref={inCallVideoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover transform -scale-x-100"
+                    />
+                  ) : (
+                    <div className="w-24 h-24 rounded-2xl bg-blue-600 text-white text-3xl font-bold flex items-center justify-center shadow-2xl">
+                      {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
+                    </div>
+                  )}
+
+                  {/* Bottom Tag with Active Voice Wave */}
+                  <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-semibold border border-white/10 shadow-lg">
+                    <span>{userName || 'You'} (You)</span>
+                    {!micEnabled ? (
+                      <span className="p-1 rounded-md bg-red-500/20 text-red-400">
+                        <MicOff className="w-3 h-3" />
+                      </span>
+                    ) : audioVolume > 15 ? (
+                      <div className="flex items-end gap-0.5 h-3 ml-0.5">
+                        <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
+                        <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
+                        <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {/* Waiting Banner for Solo User */}
+                  <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-900/90 backdrop-blur-md border border-white/10 px-4 py-2 rounded-2xl text-xs text-slate-200 flex items-center gap-2.5 shadow-xl">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    <span>Waiting for others to join</span>
+                    <button
+                      type="button"
+                      onClick={copyMeetingLink}
+                      className="ml-1 px-2.5 py-1 rounded-lg bg-[#0b5cff] hover:bg-[#0a75e7] text-white font-bold text-[11px] flex items-center gap-1 transition-colors"
+                      title="Copy meeting link"
+                    >
+                      {copied ? <Check className="w-3 h-3 text-emerald-300" /> : <Copy className="w-3 h-3" />}
+                      <span>{copied ? 'Copied' : 'Invite'}</span>
+                    </button>
+                  </div>
+
+                  {handRaised && (
+                    <div className="absolute top-4 right-4 bg-amber-500 text-slate-950 p-2 rounded-xl shadow-lg animate-bounce">
+                      <Hand className="w-5 h-5" />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                // Multi-Participant Grid
+                <>
+                  {/* Local User Tile */}
+                  <div
+                    className={`relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-lg flex items-center justify-center transition-all duration-300 ${
+                      micEnabled && audioVolume > 15
+                        ? 'border-blue-500 ring-2 ring-[#0b5cff] shadow-blue-500/25'
+                        : 'border-slate-800/80'
+                    }`}
+                  >
+                    {camEnabled ? (
+                      <video
+                        ref={inCallVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover transform -scale-x-100"
+                      />
+                    ) : (
+                      <div className="w-16 h-16 rounded-2xl bg-blue-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                        {userName ? userName.slice(0, 2).toUpperCase() : 'YOU'}
+                      </div>
+                    )}
+                    <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-semibold border border-white/10 shadow-md">
+                      <span>{userName || 'You'}</span>
+                      {!micEnabled ? (
+                        <MicOff className="w-3 h-3 text-red-400" />
+                      ) : audioVolume > 15 ? (
+                        <div className="flex items-end gap-0.5 h-2.5">
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-1" />
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-2" />
+                          <span className="w-1 bg-emerald-400 rounded-full animate-voice-bar-3" />
+                        </div>
+                      ) : null}
+                    </div>
+                    {handRaised && (
+                      <div className="absolute top-2.5 right-2.5 bg-amber-500 text-slate-950 p-1.5 rounded-xl shadow-md animate-bounce">
+                        <Hand className="w-4 h-4" />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Remote Participant Tiles */}
+                  {otherParticipants.map((participant) => {
+                    const remoteStream = remoteStreams[participant.name];
+
+                    return (
+                      <div
+                        key={participant.id}
+                        className="relative w-full h-full min-h-[180px] rounded-2xl sm:rounded-3xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-lg flex items-center justify-center"
+                      >
+                        {remoteStream ? (
+                          <video
+                            autoPlay
+                            playsInline
+                            className="w-full h-full object-cover"
+                            ref={(el) => {
+                              if (el && el.srcObject !== remoteStream) {
+                                el.srcObject = remoteStream;
+                                el.play().catch(() => {});
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="flex flex-col items-center gap-2">
+                            <div className="w-16 h-16 rounded-2xl bg-indigo-600 text-white text-xl font-bold flex items-center justify-center shadow-lg">
+                              {participant.name.slice(0, 2).toUpperCase()}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                              <span>Connected</span>
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="absolute bottom-2.5 left-2.5 flex items-center gap-2 bg-slate-950/70 backdrop-blur-md px-2.5 py-1 rounded-xl text-xs font-medium border border-white/10">
+                          <span>{participant.name}</span>
+                          {participant.isHost && (
+                            <span className="text-[10px] text-blue-400 font-bold uppercase">Host</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          )}
 
           {/* Floating Emoji Reactions Stream */}
           <div className="absolute bottom-8 right-6 pointer-events-none flex flex-col items-center z-40">
@@ -1512,28 +2028,72 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         {activePanel && (
           <aside
             className={`
-              fixed inset-x-0 bottom-0 z-40 sm:relative sm:inset-auto sm:w-80 sm:h-auto 
-              bg-slate-900/98 sm:bg-slate-900 border-t sm:border-t-0 sm:border-l border-slate-800 
-              flex flex-col rounded-t-3xl sm:rounded-none max-h-[80vh] sm:max-h-full shadow-2xl 
+              fixed inset-x-0 bottom-0 z-40 sm:relative sm:inset-auto sm:w-88 sm:h-auto 
+              bg-slate-950/95 sm:bg-slate-900/98 backdrop-blur-2xl border-t sm:border-t-0 sm:border-l border-slate-800 
+              flex flex-col rounded-t-3xl sm:rounded-none max-h-[82vh] sm:max-h-full shadow-2xl 
               animate-in slide-in-from-bottom sm:slide-in-from-right duration-250 pb-safe
             `}
           >
             {/* Mobile Drag Indicator */}
             <div className="w-10 h-1 bg-slate-700 rounded-full mx-auto my-2.5 sm:hidden" />
 
-            {/* Panel Header */}
-            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-              <h3 className="text-sm font-bold capitalize text-white">
-                {activePanel === 'people' && 'People in Meeting'}
-                {activePanel === 'chat' && 'In-Call Messages'}
-                {activePanel === 'info' && 'Meeting Details'}
-              </h3>
+            {/* Google Meet Unified Top Tab Bar */}
+            <div className="px-3 pt-3 pb-2 border-b border-slate-800 flex items-center justify-between gap-1">
+              <div className="flex items-center gap-1 bg-slate-950/80 p-1 rounded-xl border border-slate-800 flex-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActivePanel('chat');
+                    setUnreadChat(false);
+                  }}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
+                    activePanel === 'chat'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                  }`}
+                >
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>Chat</span>
+                  {unreadChat && <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActivePanel('people')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-xs font-semibold transition-all ${
+                    activePanel === 'people'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>People</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-800 font-mono">
+                    {participants.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActivePanel('info')}
+                  className={`p-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    activePanel === 'info'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                  }`}
+                  title="Meeting Details"
+                >
+                  <Info className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={() => setActivePanel(null)}
-                className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
+                className="p-2 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors ml-1"
+                title="Close panel"
               >
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -1544,19 +2104,22 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 <div className="space-y-4">
                   {/* Host Admission Queue */}
                   {isHost && pendingRequests.length > 0 && (
-                    <div className="space-y-2 p-3 rounded-2xl bg-blue-950/40 border border-blue-600/40">
-                      <div className="font-bold text-blue-300">Admission Requests ({pendingRequests.length})</div>
+                    <div className="space-y-2 p-3 rounded-2xl bg-blue-950/40 border border-blue-600/40 animate-in fade-in">
+                      <div className="font-bold text-blue-300 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />
+                        <span>Admission Requests ({pendingRequests.length})</span>
+                      </div>
                       {pendingRequests.map((req) => (
                         <div
                           key={req.id}
-                          className="flex items-center justify-between p-2 rounded-xl bg-slate-900 border border-slate-800"
+                          className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900 border border-slate-800"
                         >
                           <span className="font-semibold text-white truncate mr-2">{req.name}</span>
                           <div className="flex items-center gap-1.5 shrink-0">
                             <button
                               type="button"
                               onClick={() => handleAdmitGuest(req)}
-                              className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold"
+                              className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs"
                             >
                               Admit
                             </button>
@@ -1578,54 +2141,166 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     <div className="text-[11px] font-bold uppercase text-slate-400 tracking-wider">
                       In Call ({participants.length})
                     </div>
-                    <div className="flex items-center justify-between p-2.5 rounded-xl hover:bg-slate-800/60 bg-slate-900/50 border border-slate-800/60">
-                      <span className="font-semibold text-white">{userName || 'You'} (You)</span>
-                      <span className="text-[10px] text-slate-400 font-bold">
-                        {isHost ? 'Meeting Host' : 'Participant'}
-                      </span>
+
+                    {/* Local User Tile in People List */}
+                    <div className="flex items-center justify-between p-2.5 rounded-2xl hover:bg-slate-800/60 bg-slate-900/60 border border-slate-800">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-600 to-indigo-600 text-white font-bold text-xs flex items-center justify-center shrink-0 shadow-md">
+                          {userName ? userName.slice(0, 2).toUpperCase() : 'ME'}
+                        </div>
+                        <div className="truncate">
+                          <div className="font-semibold text-white truncate">{userName || 'You'} (You)</div>
+                          <div className="text-[10px] text-slate-400 font-medium">
+                            {isHost ? 'Meeting Host' : 'Participant'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0 text-slate-400">
+                        {!micEnabled ? (
+                          <MicOff className="w-3.5 h-3.5 text-red-400" />
+                        ) : (
+                          <Mic className="w-3.5 h-3.5 text-emerald-400" />
+                        )}
+                      </div>
                     </div>
+
+                    {/* Remote Participants */}
                     {otherParticipants.map((p) => (
                       <div
                         key={p.id}
-                        className="flex items-center justify-between p-2.5 rounded-xl hover:bg-slate-800/60"
+                        className="flex items-center justify-between p-2.5 rounded-2xl hover:bg-slate-800/60 bg-slate-900/30 border border-slate-800/50"
                       >
-                        <span className="font-semibold text-slate-200">{p.name}</span>
-                        <span className="text-[10px] text-slate-400">{p.isHost ? 'Host' : 'Guest'}</span>
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-slate-700 to-slate-600 text-slate-200 font-bold text-xs flex items-center justify-center shrink-0">
+                            {p.name.slice(0, 2).toUpperCase()}
+                          </div>
+                          <div className="truncate">
+                            <div className="font-semibold text-slate-200 truncate">{p.name}</div>
+                            <div className="text-[10px] text-slate-400">{p.isHost ? 'Host' : 'Guest'}</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0 text-slate-400">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                        </div>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              {/* CHAT TAB */}
+              {/* CHAT TAB - Apple iMessage / Google Meet Refined Style */}
               {activePanel === 'chat' && (
                 <div className="h-full flex flex-col justify-between space-y-3">
-                  <div className="space-y-3 overflow-y-auto max-h-[45vh] sm:max-h-[60vh] pr-1">
-                    {chatMessages.map((msg) => (
-                      <div key={msg.id} className="space-y-0.5">
-                        <div className="flex items-baseline justify-between text-[11px]">
-                          <span className="font-bold text-blue-400">{msg.sender}</span>
-                          <span className="text-slate-500">{msg.time}</span>
-                        </div>
-                        <p className="p-2.5 rounded-2xl bg-slate-800/60 text-slate-200 leading-relaxed border border-slate-800">
-                          {msg.text}
-                        </p>
+                  <div className="space-y-3 overflow-y-auto max-h-[46vh] sm:max-h-[62vh] pr-1">
+                    {chatMessages.length === 0 ? (
+                      <div className="text-center py-10 space-y-2 text-slate-400">
+                        <MessageSquare className="w-8 h-8 mx-auto text-slate-600" />
+                        <p className="font-semibold text-slate-300">No messages yet</p>
+                        <p className="text-[11px] text-slate-500">Messages sent here are visible to everyone.</p>
                       </div>
-                    ))}
+                    ) : (
+                      chatMessages.map((msg) => {
+                        const isMe =
+                          msg.sender === (userName || (isHost ? 'Host' : 'You')) ||
+                          msg.sender === 'You';
+                        const isBot = msg.sender === 'JUMMP Bot';
+
+                        if (isBot) {
+                          return (
+                            <div key={msg.id} className="flex justify-center my-2">
+                              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-950/80 border border-slate-800/80 text-[11px] text-slate-400 shadow-sm">
+                                <Sparkles className="w-3 h-3 text-blue-400" />
+                                <span>{msg.text}</span>
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        if (isMe) {
+                          return (
+                            <div key={msg.id} className="flex flex-col items-end space-y-1">
+                              <div className="flex items-center gap-1 text-[10px] text-slate-400 mr-1 font-medium">
+                                <span>You</span>
+                                <span>•</span>
+                                <span>{msg.time}</span>
+                              </div>
+                              <div className="max-w-[85%] bg-gradient-to-br from-[#0b5cff] to-[#0a4ed4] text-white px-3.5 py-2 rounded-2xl rounded-tr-sm text-xs leading-relaxed shadow-md shadow-blue-500/10 break-words selection:bg-white/30">
+                                {msg.text}
+                              </div>
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <div key={msg.id} className="flex flex-col items-start space-y-1">
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 ml-1 font-medium">
+                              <span className="font-bold text-blue-300">{msg.sender}</span>
+                              <span>•</span>
+                              <span>{msg.time}</span>
+                            </div>
+                            <div className="max-w-[85%] bg-slate-800/90 text-slate-100 px-3.5 py-2 rounded-2xl rounded-tl-sm text-xs leading-relaxed border border-white/5 break-words shadow-sm">
+                              {msg.text}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                    <div ref={chatEndRef} />
                   </div>
 
-                  <form onSubmit={handleSendChat} className="pt-2 flex gap-2 border-t border-slate-800">
-                    <input
-                      type="text"
-                      value={newChatText}
-                      onChange={(e) => setNewChatText(e.target.value)}
-                      placeholder="Send a message to everyone..."
-                      className="flex-1 bg-slate-800 text-xs px-3.5 py-2.5 rounded-xl border border-slate-700 text-white outline-none focus:border-[#0b5cff]"
-                    />
-                    <button type="submit" className="p-2.5 rounded-xl bg-[#0b5cff] text-white hover:bg-[#0a75e7]">
-                      <Send className="w-3.5 h-3.5" />
-                    </button>
-                  </form>
+                  {/* Chat Input Container */}
+                  <div className="pt-2 space-y-2 border-t border-slate-800">
+                    {/* Quick Emojis Row */}
+                    <div className="flex items-center gap-1.5 px-1">
+                      {['👍', '❤️', '👏', '🔥', '😂', '🎉'].map((emoji) => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          onClick={() => {
+                            setNewChatText((prev) => prev + emoji);
+                          }}
+                          className="px-2 py-0.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-xs transition-colors hover:scale-110 active:scale-95"
+                          title={`Insert ${emoji}`}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleSendChat();
+                      }}
+                      className="flex gap-2 items-center bg-slate-900/90 p-1.5 rounded-2xl border border-slate-800 focus-within:border-blue-500/80 focus-within:ring-2 focus-within:ring-blue-500/20 transition-all"
+                    >
+                      <input
+                        type="text"
+                        value={newChatText}
+                        onChange={(e) => setNewChatText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleSendChat();
+                          }
+                        }}
+                        placeholder="Send a message to everyone..."
+                        className="flex-1 bg-transparent text-xs px-3 py-1.5 text-white outline-none placeholder:text-slate-500"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!newChatText.trim()}
+                        className={`p-2 rounded-xl text-white transition-all ${
+                          newChatText.trim()
+                            ? 'bg-[#0b5cff] hover:bg-[#0a75e7] shadow-md shadow-blue-500/25 active:scale-95'
+                            : 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-60'
+                        }`}
+                        title="Send message"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                      </button>
+                    </form>
+                  </div>
                 </div>
               )}
 
@@ -1636,17 +2311,22 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     <h4 className="font-bold text-sm text-white mb-1">Meeting Details</h4>
                     <p className="text-slate-400">Share this link to invite others to join this room.</p>
                   </div>
-                  <div className="p-3 rounded-xl bg-slate-800 border border-slate-700 font-mono text-[11px] break-all text-blue-300 select-all">
+                  <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 font-mono text-[11px] break-all text-blue-300 select-all shadow-inner">
                     {getMeetingUrl(meetingId)}
                   </div>
                   <button
                     type="button"
                     onClick={copyMeetingLink}
-                    className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2"
+                    className="w-full py-3.5 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-98 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-blue-500/25 transition-all"
                   >
-                    {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    {copied ? <Check className="w-4 h-4 text-emerald-300" /> : <Copy className="w-4 h-4" />}
                     <span>{copied ? 'Copied to clipboard' : 'Copy joining info'}</span>
                   </button>
+
+                  <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 flex items-center gap-2.5 text-slate-400 text-[11px]">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Peer-to-peer encrypted connection active</span>
+                  </div>
                 </div>
               )}
             </div>
@@ -1665,7 +2345,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 triggerReaction(emoji);
                 setShowReactionsPicker(false);
               }}
-              className="w-9 h-9 rounded-full hover:bg-slate-800 flex items-center justify-center text-lg hover:scale-125 transition-transform"
+              className="w-9 h-9 rounded-xl hover:bg-slate-800 flex items-center justify-center text-lg hover:scale-125 transition-transform"
             >
               {emoji}
             </button>
@@ -1673,141 +2353,274 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </div>
       )}
 
-      {/* GOOGLE MEET FLOATING BOTTOM CONTROL DOCK (Responsive Viewport) */}
-      <footer className="h-20 sm:h-22 bg-slate-950/95 border-t border-slate-900 px-3 sm:px-6 flex items-center justify-between shrink-0 z-30 pb-safe">
+      {/* JUMMP MEET FLOATING BOTTOM CONTROL DOCK (Apple-Style Minimalist Dock) */}
+      <footer className="h-20 sm:h-22 bg-slate-950/90 backdrop-blur-2xl border-t border-slate-900/90 px-3 sm:px-6 flex items-center justify-between shrink-0 z-30 pb-safe">
         {/* Left: Meeting Code */}
         <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
-          <span>{meetingId}</span>
+          <span className="px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-800 select-all">{meetingId}</span>
         </div>
 
-        {/* Center Main Controls */}
-        <div className="flex items-center gap-2 sm:gap-3 mx-auto">
+        {/* Center Main Controls Island (Apple-Style Elevated Capsule) */}
+        <div className="flex items-center gap-1.5 sm:gap-2 mx-auto bg-slate-900/80 backdrop-blur-xl border border-white/10 p-1.5 sm:p-2 rounded-3xl shadow-2xl shadow-black/40">
           {/* Mic */}
-          <button
-            type="button"
-            onClick={toggleMic}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
-              micEnabled
-                ? 'bg-slate-800 hover:bg-slate-700 text-white'
-                : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
-            }`}
-            title={micEnabled ? 'Mute microphone' : 'Unmute microphone'}
-          >
-            {micEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={toggleMic}
+              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                micEnabled
+                  ? audioVolume > 15
+                    ? 'bg-slate-800 text-white border-emerald-400 ring-2 ring-emerald-400/80 shadow-lg shadow-emerald-500/20'
+                    : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
+                  : 'bg-red-600 hover:bg-red-700 text-white border-red-500/50 shadow-lg shadow-red-600/30'
+              }`}
+            >
+              {micEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              {micEnabled ? 'Mute microphone' : 'Unmute microphone'}
+            </span>
+          </div>
 
           {/* Cam */}
-          <button
-            type="button"
-            onClick={toggleCam}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
-              camEnabled
-                ? 'bg-slate-800 hover:bg-slate-700 text-white'
-                : 'bg-red-600 hover:bg-red-700 text-white shadow-lg shadow-red-600/30'
-            }`}
-            title={camEnabled ? 'Turn off camera' : 'Turn on camera'}
-          >
-            {camEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={toggleCam}
+              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                camEnabled
+                  ? 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
+                  : 'bg-red-600 hover:bg-red-700 text-white border-red-500/50 shadow-lg shadow-red-600/30'
+              }`}
+            >
+              {camEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              {camEnabled ? 'Turn off camera' : 'Turn on camera'}
+            </span>
+          </div>
 
           {/* Screen Share */}
-          <button
-            type="button"
-            onClick={toggleScreenShare}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
-              isScreenSharing
-                ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30'
-                : 'bg-slate-800 hover:bg-slate-700 text-white'
-            }`}
-            title={isScreenSharing ? 'Stop sharing screen' : 'Share your screen'}
-          >
-            <MonitorUp className="w-5 h-5" />
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={toggleScreenShare}
+              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                isScreenSharing
+                  ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-500/30'
+                  : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
+              }`}
+            >
+              <MonitorUp className="w-5 h-5" />
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              {isScreenSharing ? 'Stop presenting' : 'Present screen'}
+            </span>
+          </div>
+
+          {/* Browser Record Button */}
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={isRecording ? stopBrowserRecording : startBrowserRecording}
+              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                isRecording
+                  ? 'bg-red-600 text-white border-red-500 animate-pulse shadow-lg shadow-red-600/30'
+                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border-white/10'
+              }`}
+            >
+              <Disc className="w-5 h-5" />
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              {isRecording ? 'Stop recording' : 'Record meeting'}
+            </span>
+          </div>
 
           {/* Hand Raise */}
-          <button
-            type="button"
-            onClick={() => {
-              playChime('hand');
-              setHandRaised(!handRaised);
-            }}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
-              handRaised
-                ? 'bg-amber-500 text-slate-950 font-bold shadow-lg shadow-amber-500/30'
-                : 'bg-slate-800 hover:bg-slate-700 text-white'
-            }`}
-            title={handRaised ? 'Lower hand' : 'Raise hand'}
-          >
-            <Hand className="w-5 h-5" />
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => {
+                playChime('hand');
+                setHandRaised(!handRaised);
+              }}
+              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                handRaised
+                  ? 'bg-amber-500 text-slate-950 font-bold border-amber-400 shadow-lg shadow-amber-500/30'
+                  : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
+              }`}
+            >
+              <Hand className="w-5 h-5" />
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              {handRaised ? 'Lower hand' : 'Raise hand'}
+            </span>
+          </div>
 
           {/* Emoji Reactions Trigger */}
-          <button
-            type="button"
-            onClick={() => setShowReactionsPicker(!showReactionsPicker)}
-            className={`p-3 sm:p-3.5 rounded-full transition-all active:scale-90 ${
-              showReactionsPicker ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-white'
-            }`}
-            title="Send reaction"
-          >
-            <Smile className="w-5 h-5" />
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => setShowReactionsPicker(!showReactionsPicker)}
+              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                showReactionsPicker
+                  ? 'bg-blue-600 text-white border-blue-500'
+                  : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
+              }`}
+            >
+              <Smile className="w-5 h-5" />
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              Send reaction
+            </span>
+          </div>
 
-          {/* End Call Button */}
-          <button
-            type="button"
-            onClick={handleLeaveCall}
-            className="px-4 sm:px-6 py-3 rounded-full bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center gap-1.5 sm:gap-2 active:scale-95 transition-all"
-            title="Leave call"
-          >
-            <PhoneOff className="w-5 h-5" />
-            <span className="hidden sm:inline">Leave</span>
-          </button>
+          {/* Leave Call Button */}
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={handleLeaveCall}
+              className="px-4 sm:px-5 py-3 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center gap-1.5 active:scale-95 transition-all border border-red-500/50 ml-1"
+            >
+              <PhoneOff className="w-5 h-5" />
+              <span className="hidden sm:inline">Leave</span>
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              Leave call
+            </span>
+          </div>
         </div>
 
         {/* Right Action Icons (Info / People / Chat) */}
         <div className="flex items-center gap-1 sm:gap-2">
-          <button
-            type="button"
-            onClick={() => setActivePanel(activePanel === 'info' ? null : 'info')}
-            className={`p-2.5 rounded-xl transition-colors ${
-              activePanel === 'info' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'
-            }`}
-            title="Meeting details"
-          >
-            <Info className="w-5 h-5" />
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => setActivePanel(activePanel === 'info' ? null : 'info')}
+              className={`p-2.5 rounded-xl transition-colors ${
+                activePanel === 'info'
+                  ? 'bg-blue-600 text-white'
+                  : 'hover:bg-slate-800 text-slate-400 hover:text-white'
+              }`}
+            >
+              <Info className="w-5 h-5" />
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              Meeting details
+            </span>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => setActivePanel(activePanel === 'people' ? null : 'people')}
-            className={`p-2.5 rounded-xl transition-colors relative ${
-              activePanel === 'people' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'
-            }`}
-            title="People in meeting"
-          >
-            <Users className="w-5 h-5" />
-            {pendingRequests.length > 0 && isHost && (
-              <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
-            )}
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => setActivePanel(activePanel === 'people' ? null : 'people')}
+              className={`p-2.5 rounded-xl transition-colors relative ${
+                activePanel === 'people'
+                  ? 'bg-blue-600 text-white'
+                  : 'hover:bg-slate-800 text-slate-400 hover:text-white'
+              }`}
+            >
+              <Users className="w-5 h-5" />
+              {pendingRequests.length > 0 && isHost && (
+                <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+              )}
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              People ({participants.length})
+            </span>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              setActivePanel(activePanel === 'chat' ? null : 'chat');
-              setUnreadChat(false);
-            }}
-            className={`p-2.5 rounded-xl transition-colors relative ${
-              activePanel === 'chat' ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-slate-400 hover:text-white'
-            }`}
-            title="Chat with everyone"
-          >
-            <MessageSquare className="w-5 h-5" />
-            {unreadChat && <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-[#0b5cff]" />}
-          </button>
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => {
+                setActivePanel(activePanel === 'chat' ? null : 'chat');
+                setUnreadChat(false);
+              }}
+              className={`p-2.5 rounded-xl transition-colors relative ${
+                activePanel === 'chat'
+                  ? 'bg-blue-600 text-white'
+                  : 'hover:bg-slate-800 text-slate-400 hover:text-white'
+              }`}
+            >
+              <MessageSquare className="w-5 h-5" />
+              {unreadChat && (
+                <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-[#0b5cff] animate-pulse" />
+              )}
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              In-call chat
+            </span>
+          </div>
         </div>
       </footer>
+
+      {/* APPLE-STYLE RECORDING DOWNLOAD MODAL */}
+      {showRecordingModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="relative w-full max-w-lg bg-slate-950/95 border border-white/15 rounded-3xl p-6 shadow-2xl space-y-4 text-left">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400">
+                  <Disc className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">Meeting Recording Ready</h3>
+                  <p className="text-xs text-slate-400">Captured locally in your browser</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRecordingModal(false)}
+                className="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Video Player Preview */}
+            {recordedUrl && (
+              <div className="relative aspect-video rounded-2xl overflow-hidden bg-black border border-slate-800 shadow-inner">
+                <video src={recordedUrl} controls className="w-full h-full object-contain" />
+              </div>
+            )}
+
+            {/* Metadata Badges */}
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 font-mono">
+                Duration: {formatTimer(recordingSeconds)}
+              </span>
+              {recordedBlob && (
+                <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 font-mono">
+                  {(recordedBlob.size / (1024 * 1024)).toFixed(2)} MB
+                </span>
+              )}
+              <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
+                HD WebM Video
+              </span>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowRecordingModal(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-900 transition-colors"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={downloadRecording}
+                className="px-5 py-2.5 rounded-xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-xs shadow-lg shadow-blue-500/25 transition-all flex items-center gap-2"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download Recording</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
