@@ -179,7 +179,6 @@ export default function AdminDeskPage() {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [logs, setLogs] = useState<ConsoleLog[]>([]);
   const [activeTab, setActiveTab] = useState<'radar' | 'overview' | 'limits' | 'rooms' | 'diagnostics'>('radar');
-  const [selectedPlanTab, setSelectedPlanTab] = useState<'starter' | 'pro' | 'enterprise'>('starter');
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [incomingAlert, setIncomingAlert] = useState<IncomingCallAlert | null>(null);
@@ -1015,7 +1014,7 @@ export default function AdminDeskPage() {
           {[
             { id: 'radar', label: `Live Call Radar (${liveActiveRooms.length})`, icon: Radio },
             { id: 'overview', label: 'Platform Status', icon: Activity },
-            { id: 'limits', label: 'Plans & Capacities', icon: HardDrive },
+            { id: 'limits', label: 'Free Tier & Limits', icon: HardDrive },
             { id: 'rooms', label: 'All Meeting Rooms', icon: Layers },
             { id: 'diagnostics', label: 'Console & Telemetry', icon: Terminal },
           ].map((tab) => {
@@ -1570,292 +1569,52 @@ export default function AdminDeskPage() {
               </div>
             </div>
 
-            {/* 2. OFFICIAL JUMMP COMMERCIAL PLANS (MATCHING WEBSITE PLANS) */}
-            <div className="pt-8 border-t border-white/10 space-y-6">
-              {/* Header */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            {/* Platform Resource Thresholds & Architecture Policies */}
+            <div className="pt-6 border-t border-white/10 space-y-4">
+              <div className="flex items-center justify-between">
                 <div>
-                  <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-blue-500/10 text-[#0b5cff] border border-blue-400/20 mb-2">
-                    <Sparkles className="w-3.5 h-3.5" />
-                    UNLIMITED WEBINAR BROADCASTING
+                  <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                    <Sliders className="w-4 h-4 text-blue-400" />
+                    Platform Infrastructure Policies & Safeguards
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Guaranteed constraints and telemetry policies enforced across all active sessions.
+                  </p>
+                </div>
+                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                  Strict Compliance
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div className="p-4 rounded-xl bg-white/[0.02] border border-white/10 space-y-2">
+                  <div className="flex items-center gap-2 text-amber-400 font-semibold text-xs">
+                    <ShieldCheck className="w-4 h-4" />
+                    <span>Zero-DB Recording Policy</span>
                   </div>
-                  <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-                    Scale your events with <span className="text-[#0b5cff]">zero seat caps</span>.
-                  </h2>
-                  <p className="text-xs sm:text-sm text-slate-400 max-w-2xl mt-1">
-                    Stream to 50 or 500,000 attendees with flat pricing, ultra-low latency WebRTC, and zero required downloads for participants.
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Media streams are captured client-side via MediaRecorder and offered as immediate browser downloads. Zero video storage is retained on Supabase to ensure $0 storage costs.
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2 self-start sm:self-center">
-                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    Active: Free Community Tier
-                  </span>
-                  <Link
-                    href="/pricing"
-                    target="_blank"
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 text-xs font-medium transition-all"
-                  >
-                    <span>View /pricing</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </Link>
-                </div>
-              </div>
-
-              {/* Plan Selector Buttons */}
-              <div className="inline-flex items-center p-1.5 rounded-2xl bg-white/5 border border-white/10 gap-1.5">
-                {(['starter', 'pro', 'enterprise'] as const).map((planKey) => {
-                  const isSelected = selectedPlanTab === planKey;
-                  return (
-                    <button
-                      key={planKey}
-                      onClick={() => setSelectedPlanTab(planKey)}
-                      className={`px-6 py-2.5 rounded-xl text-xs font-bold capitalize transition-all flex items-center gap-2 ${
-                        isSelected
-                          ? 'bg-[#0b5cff] text-white shadow-lg shadow-blue-500/25'
-                          : 'text-slate-400 hover:text-white hover:bg-white/5'
-                      }`}
-                    >
-                      <span>{planKey === 'pro' ? 'Pro' : planKey === 'starter' ? 'Starter' : 'Enterprise'}</span>
-                      {planKey === 'pro' && (
-                        <span className={`text-[10px] uppercase font-extrabold px-1.5 py-0.5 rounded ${
-                          isSelected ? 'bg-amber-400 text-slate-900' : 'bg-amber-400/20 text-amber-300'
-                        }`}>
-                          HOT
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Selected Plan Details Showcase (Full-Width Clean Dashboard Card) */}
-              <div className="p-6 sm:p-8 rounded-3xl bg-white/[0.03] border border-white/10 backdrop-blur-xl shadow-2xl relative overflow-hidden">
-                <div className="flex flex-col md:flex-row md:items-start justify-between gap-6">
-                  <div>
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#0b5cff]">
-                      SELECTED PLAN SPECIFICATION
-                    </span>
-                    <h3 className="text-2xl sm:text-3xl font-bold text-white mt-1 capitalize">
-                      {selectedPlanTab} Plan
-                    </h3>
-                    <p className="text-xs sm:text-sm italic text-slate-300 mt-1 max-w-xl">
-                      {selectedPlanTab === 'starter'
-                        ? 'Perfect for solo creators & small interactive workshops.'
-                        : selectedPlanTab === 'pro'
-                        ? 'For growing businesses running frequent, high-impact webinars with timed offers & ticket sales.'
-                        : 'Dedicated infrastructure, custom SLAs & white-label branding for global enterprises.'}
-                    </p>
+                <div className="p-4 rounded-xl bg-white/[0.02] border border-white/10 space-y-2">
+                  <div className="flex items-center gap-2 text-blue-400 font-semibold text-xs">
+                    <Zap className="w-4 h-4" />
+                    <span>10-Minute Idle Watchdog</span>
                   </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Meetings with no participant activity or heartbeat for more than 10 minutes are flagged as stale and automatically terminated to release WebRTC connections.
+                  </p>
+                </div>
 
-                  <div className="text-left md:text-right bg-black/30 p-4 rounded-2xl border border-white/5 min-w-[180px]">
-                    <span className="text-[11px] uppercase tracking-wider text-slate-400 block">Tier Pricing</span>
-                    <span className="text-3xl sm:text-4xl font-extrabold text-[#0b5cff]">
-                      {selectedPlanTab === 'starter' ? '₹999' : selectedPlanTab === 'pro' ? '₹1,999' : 'Custom'}
-                    </span>
-                    <span className="text-xs text-slate-400 font-medium ml-1">/month</span>
+                <div className="p-4 rounded-xl bg-white/[0.02] border border-white/10 space-y-2">
+                  <div className="flex items-center gap-2 text-emerald-400 font-semibold text-xs">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Adaptive LiveKit SFU</span>
                   </div>
-                </div>
-
-                {/* Feature checklist grid */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-6 mt-6 border-t border-white/10">
-                  {(selectedPlanTab === 'starter'
-                    ? [
-                        'Unlimited attendees per session',
-                        '1 active concurrent room',
-                        '1080p Full HD streaming',
-                        'Live chat, Q&A & polls',
-                      ]
-                    : selectedPlanTab === 'pro'
-                    ? [
-                        'Unlimited attendees (no seat caps)',
-                        'Unlimited concurrent webinar rooms',
-                        '1080p 60fps & 4K ultra-low latency',
-                        'Timed offer cards & ticket sales',
-                        'Real-time attendance & retention curves',
-                        'Cloud recording & browser backup',
-                        'Custom GA4 & Meta Pixel tracking',
-                        'API & Webhooks access',
-                      ]
-                    : [
-                        '1M+ concurrent attendee support',
-                        'Dedicated media server clusters',
-                        'Custom white-label domain & SSL',
-                        'Dedicated account manager & 99.99% SLA',
-                        'Full data export & BigQuery sync',
-                        'Custom legal and SLA agreements',
-                        'Single Sign-On (SAML / Okta)',
-                        'Priority 24/7 engineering hotline',
-                      ]
-                  ).map((feat, i) => (
-                    <div key={i} className="flex items-center gap-2.5 text-xs sm:text-sm text-slate-200 bg-white/[0.02] p-3 rounded-xl border border-white/5">
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>{feat}</span>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Trust Badges */}
-                <div className="pt-6 mt-6 border-t border-white/10 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-400">
-                  <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-1.5 text-amber-300 font-semibold">
-                      <span>★★★★★</span>
-                      <span className="text-slate-300">4.9/5 Rating</span>
-                    </div>
-                    <span className="text-white/20">•</span>
-                    <div className="flex items-center gap-1.5 text-slate-300">
-                      <ShieldCheck className="w-4 h-4 text-blue-400" />
-                      <span>256-bit TLS Encryption</span>
-                    </div>
-                    <span className="text-white/20">•</span>
-                    <div className="flex items-center gap-1.5 text-slate-300">
-                      <Zap className="w-4 h-4 text-amber-400" />
-                      <span>Instant Activation</span>
-                    </div>
-                  </div>
-
-                  <Link
-                    href={`/signup?plan=${selectedPlanTab}`}
-                    target="_blank"
-                    className="inline-flex items-center gap-1 text-[#0b5cff] hover:underline text-xs font-semibold"
-                  >
-                    <span>View live registration at /signup?plan={selectedPlanTab}</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </Link>
-                </div>
-              </div>
-
-              {/* Comprehensive Feature Comparison Matrix (Matching /pricing) */}
-              <div className="p-6 rounded-2xl bg-white/[0.02] border border-white/10 backdrop-blur-xl">
-                <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                    <Sliders className="w-4 h-4 text-blue-400" />
-                    Complete Plan Capabilities & Entitlements Matrix
-                  </h3>
-                  <span className="text-[11px] text-slate-400">
-                    Source: <Link href="/pricing" target="_blank" className="text-[#0b5cff] hover:underline">jummp.io/pricing</Link>
-                  </span>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-white/10 text-slate-400 text-[11px] uppercase tracking-wider font-semibold">
-                      <tr>
-                        <th className="pb-3 text-white">Feature / Capability</th>
-                        <th className="pb-3 text-emerald-400">Free Tier (Active)</th>
-                        <th className="pb-3 text-blue-400">Starter (₹999)</th>
-                        <th className="pb-3 text-amber-300">Pro (₹1,999)</th>
-                        <th className="pb-3 text-purple-400">Enterprise (Custom)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-white/5">
-                      {/* Capacity & Streaming */}
-                      <tr className="bg-white/[0.02]">
-                        <td colSpan={5} className="py-2 px-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                          Capacity & Streaming
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Max Attendees per Session</td>
-                        <td className="py-2.5 font-mono text-emerald-400 font-semibold">Up to 100 peers</td>
-                        <td className="py-2.5 font-mono text-white">Unlimited</td>
-                        <td className="py-2.5 font-mono text-white font-bold">Unlimited</td>
-                        <td className="py-2.5 font-mono text-white">1M+ Concurrent</td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Streaming Quality</td>
-                        <td className="py-2.5 font-mono text-emerald-400">1080p HD</td>
-                        <td className="py-2.5 font-mono text-slate-300">1080p HD</td>
-                        <td className="py-2.5 font-mono text-amber-300 font-semibold">1080p 60fps HD</td>
-                        <td className="py-2.5 font-mono text-purple-300">4K Ultra-Low Latency</td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Concurrent Webinar Rooms</td>
-                        <td className="py-2.5 font-mono text-slate-400">1 Active</td>
-                        <td className="py-2.5 font-mono text-slate-400">1 Active</td>
-                        <td className="py-2.5 font-mono text-emerald-400 font-semibold">Unlimited</td>
-                        <td className="py-2.5 font-mono text-purple-300">Dedicated Cluster</td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Session Duration Limit</td>
-                        <td className="py-2.5 font-mono text-amber-300">10m Idle Cutoff</td>
-                        <td className="py-2.5 font-mono text-emerald-400">Unlimited</td>
-                        <td className="py-2.5 font-mono text-emerald-400">Unlimited</td>
-                        <td className="py-2.5 font-mono text-emerald-400">Unlimited</td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Recording Storage Policy</td>
-                        <td className="py-2.5 text-amber-300 font-medium">Zero-DB Ephemeral (Download)</td>
-                        <td className="py-2.5 text-slate-300">Browser Download</td>
-                        <td className="py-2.5 text-emerald-400 font-semibold">Cloud Recording & Backup</td>
-                        <td className="py-2.5 text-purple-300 font-semibold">Dedicated Cloud Archival</td>
-                      </tr>
-
-                      {/* Audience Engagement */}
-                      <tr className="bg-white/[0.02]">
-                        <td colSpan={5} className="py-2 px-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                          Audience Engagement
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Live Chat & Reactions</td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Moderated Q&A with Upvoting</td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Interactive Live Polls</td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Timed Offer Cards & CTAs</td>
-                        <td className="py-2.5 text-slate-600 font-bold">—</td>
-                        <td className="py-2.5 text-slate-600 font-bold">—</td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                      </tr>
-
-                      {/* Monetization & Analytics */}
-                      <tr className="bg-white/[0.02]">
-                        <td colSpan={5} className="py-2 px-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                          Monetization & Analytics
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Sell Paid Webinar Tickets</td>
-                        <td className="py-2.5 text-slate-600 font-bold">—</td>
-                        <td className="py-2.5 text-slate-600 font-bold">—</td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                        <td className="py-2.5"><CheckCircle2 className="w-4 h-4 text-emerald-400" /></td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Attendance Curve Reports</td>
-                        <td className="py-2.5 text-slate-400">Live Radar</td>
-                        <td className="py-2.5 text-slate-300">Basic</td>
-                        <td className="py-2.5 text-emerald-400 font-medium">Real-time Deep</td>
-                        <td className="py-2.5 text-purple-300 font-medium">Full Export & BigQuery</td>
-                      </tr>
-                      <tr>
-                        <td className="py-2.5 text-slate-300">Custom Domain & SLA</td>
-                        <td className="py-2.5 text-slate-600 font-bold">—</td>
-                        <td className="py-2.5 text-slate-600 font-bold">—</td>
-                        <td className="py-2.5 text-slate-600 font-bold">—</td>
-                        <td className="py-2.5 text-purple-300 font-bold">99.99% SLA</td>
-                      </tr>
-                    </tbody>
-                  </table>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Dynamic simulcast bandwidth allocation. Supports up to 100 concurrent WebRTC peers with automated fallback to prevent frame drops or server overload.
+                  </p>
                 </div>
               </div>
             </div>
