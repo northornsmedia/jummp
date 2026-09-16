@@ -2798,21 +2798,31 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           pipWindowRef.current = pipWindow;
           setIsPiPActive(true);
 
-          // Copy stylesheets
-          [...document.styleSheets].forEach((sheet) => {
-            try {
-              const cssRules = [...sheet.cssRules].map((r) => r.cssText).join('');
-              const style = pipWindow.document.createElement('style');
-              style.textContent = cssRules;
-              pipWindow.document.head.appendChild(style);
-            } catch {
-              const link = pipWindow.document.createElement('link');
-              link.rel = 'stylesheet';
-              link.type = sheet.type;
-              link.href = sheet.href;
-              pipWindow.document.head.appendChild(link);
+          // Copy stylesheets safely without iterator / downlevelIteration errors
+          try {
+            for (let i = 0; i < document.styleSheets.length; i++) {
+              const sheet = document.styleSheets[i];
+              try {
+                let cssRules = '';
+                if (sheet.cssRules) {
+                  for (let j = 0; j < sheet.cssRules.length; j++) {
+                    cssRules += sheet.cssRules[j].cssText + '\n';
+                  }
+                }
+                const style = pipWindow.document.createElement('style');
+                style.textContent = cssRules;
+                pipWindow.document.head.appendChild(style);
+              } catch {
+                if (sheet.href) {
+                  const link = pipWindow.document.createElement('link');
+                  link.rel = 'stylesheet';
+                  link.type = sheet.type || 'text/css';
+                  link.href = sheet.href;
+                  pipWindow.document.head.appendChild(link);
+                }
+              }
             }
-          });
+          } catch {}
 
           pipWindow.document.body.style.cssText =
             'margin:0;padding:0;background:#0b0f19;color:white;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;display:flex;flex-direction:column;height:100vh;user-select:none;';
@@ -2846,12 +2856,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           pipVideo.style.cssText =
             'width:100%;height:100%;object-fit:contain;background:#000;';
 
+          const firstRemoteStream =
+            Object.values(remoteStreamsRef.current)[0] ||
+            Object.values(remoteStreams)[0] ||
+            null;
+
           const targetStream =
             localScreenStreamRef.current ||
             screenStream ||
             remoteScreenStream ||
-            (participants.find((p) => p.stream)?.stream) ||
-            localStreamRef.current;
+            firstRemoteStream ||
+            localStreamRef.current ||
+            localStream;
 
           if (targetStream) {
             pipVideo.srcObject = targetStream;
@@ -2941,6 +2957,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inCall, isScreenSharing, remoteScreenStream]);
 
   // Screen Sharing
