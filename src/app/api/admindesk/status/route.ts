@@ -404,6 +404,7 @@ export async function GET(req: NextRequest) {
       totalParticipants: supabaseStats.totalParticipants,
       totalMessages: supabaseStats.totalMessages,
       totalBurnedMinutes: supabaseStats.totalBurnedMinutes,
+      totalParticipantStreamingMinutes: supabaseStats.totalParticipantStreamingMinutes,
       liveWebRtcRooms: livekitRooms.length,
       liveWebRtcParticipants: totalLiveKitParticipants,
     },
