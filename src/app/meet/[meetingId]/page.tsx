@@ -493,9 +493,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     sendBackendHeartbeat('heartbeat');
 
+    // 60-second heartbeat with random jitter (±5s) to eliminate concurrent spikes across 10k users
+    const jitter = Math.floor(Math.random() * 10000) - 5000;
     const interval = setInterval(() => {
       sendBackendHeartbeat('heartbeat');
-    }, 20000);
+    }, 60000 + jitter);
 
     return () => {
       clearInterval(interval);
@@ -795,11 +797,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           video: camEnabled
             ? {
                 facingMode: 'user',
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
+                width: { ideal: 1920, min: 640 },
+                height: { ideal: 1080, min: 360 },
+                frameRate: { ideal: 45, max: 45, min: 15 },
               }
             : false,
-          audio: micEnabled ? { echoCancellation: true, noiseSuppression: true } : false,
+          audio: micEnabled
+            ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            : false,
         });
 
         const previousStream = localStreamRef.current;
@@ -2598,8 +2603,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           const freshMedia = await navigator.mediaDevices.getUserMedia({
             video: {
               facingMode: 'user',
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
+              width: { ideal: 1920, min: 640 },
+              height: { ideal: 1080, min: 360 },
+              frameRate: { ideal: 45, max: 45, min: 15 },
             },
           });
           const freshTrack = freshMedia.getVideoTracks()[0];
@@ -3048,29 +3054,33 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
       let stream: MediaStream;
       try {
+        const screenVideoConstraints = {
+          width: { ideal: 1920, max: 2560 },
+          height: { ideal: 1080, max: 1440 },
+          frameRate: { ideal: 45, max: 45 },
+        };
+
         if (isMobileDevice) {
-          // Mobile browsers (Chrome Android / iOS Safari) strictly reject getDisplayMedia when audio: true is requested
+          // Mobile browsers strictly reject custom capture/audio combinations
           stream = await navigator.mediaDevices.getDisplayMedia({
             video: true,
           });
         } else {
           try {
             stream = await navigator.mediaDevices.getDisplayMedia({
-              video: true,
+              video: screenVideoConstraints,
               audio: true,
             } as any);
-          } catch (audioErr: any) {
-            // Fallback to video only if audio capture is not supported or rejected
-            if (
-              audioErr?.name === 'NotSupportedError' ||
-              audioErr?.name === 'TypeError' ||
-              audioErr?.name === 'OverconstrainedError'
-            ) {
+          } catch {
+            try {
+              stream = await navigator.mediaDevices.getDisplayMedia({
+                video: screenVideoConstraints,
+              });
+            } catch {
+              // Final fallback to generic video: true if device restricts high-framerate capture
               stream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
               });
-            } else {
-              throw audioErr;
             }
           }
         }

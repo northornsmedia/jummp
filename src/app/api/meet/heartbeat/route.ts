@@ -12,6 +12,10 @@ const supabase =
       })
     : null;
 
+// In-memory write deduplication and throttle cache for rooms (code -> { lastTouch, cachedResult })
+const roomWriteThrottle = new Map<string, { lastTouch: number; cachedResult?: any }>();
+const WRITE_THROTTLE_MS = 60000; // 60 seconds
+
 export async function POST(req: NextRequest) {
   try {
     if (!supabase) {
@@ -36,6 +40,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Participant identity mismatch' }, { status: 403 });
     }
 
+    const isDestructive = body.endMeeting || action === 'leave' || action === 'end';
+    const now = Date.now();
+    const cached = roomWriteThrottle.get(code);
+
+    // Free Tier Protection: If regular heartbeat and room was updated in DB less than 60s ago, return cached success
+    if (!isDestructive && cached && now - cached.lastTouch < WRITE_THROTTLE_MS) {
+      return NextResponse.json({
+        success: true,
+        cached: true,
+        activeParticipantsCount: cached.cachedResult?.activeParticipantsCount ?? 1,
+      });
+    }
+
     const safeAction = action === 'leave' || action === 'keepalive' || action === 'end' ? action : 'heartbeat';
     const { data, error } = await supabase.rpc('rpc_heartbeat', {
       p_code: code,
@@ -54,6 +71,9 @@ export async function POST(req: NextRequest) {
           active_participants_count: 0,
         })
         .eq('code', code);
+      roomWriteThrottle.delete(code);
+    } else if (!isDestructive) {
+      roomWriteThrottle.set(code, { lastTouch: now, cachedResult: data });
     }
 
     if (error) {
