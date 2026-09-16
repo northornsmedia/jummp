@@ -408,7 +408,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       // (For free & returning users: once event ended & empty, opening the link activates it immediately)
       const activeMeeting = await activateMeeting(
         meetingId,
-        userName || (isHost ? 'Host' : 'Guest')
+        isHost ? 'Host' : 'Guest'
       );
 
       if (activeMeeting && isMounted) {
@@ -4117,22 +4117,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             type="button"
             onClick={() => {
               triggerHaptic('light');
-              setActivePanel(activePanel === 'notes' ? null : 'notes');
+              setActivePanel(activePanel === 'chat' ? null : 'chat');
+              setUnreadChat(false);
             }}
             className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all ${
-              activePanel === 'notes'
+              activePanel === 'chat'
                 ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/30 ring-2 ring-blue-400/40'
                 : 'bg-slate-800/90 hover:bg-slate-700 border-slate-700/80 text-slate-200 hover:text-white shadow-sm'
             }`}
-            title="Open Live Notes & Transcripts"
+            title="Open chat"
           >
-            <FileText className={`w-3.5 h-3.5 ${activePanel === 'notes' ? 'text-white' : 'text-blue-400'}`} />
-            <span className="hidden sm:inline">Notes</span>
-            {meetingNotes.length > 1 && (
-              <span className="px-1.5 py-0.2 rounded-full bg-blue-500/25 text-[10px] font-mono font-bold text-blue-300">
-                {meetingNotes.length - 1}
-              </span>
-            )}
+            <MessageSquare className={`w-3.5 h-3.5 ${activePanel === 'chat' ? 'text-white' : 'text-blue-400'}`} />
+            <span className="hidden sm:inline">Chat</span>
+            {unreadChat && <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />}
           </button>
 
           <span className="font-mono ml-1 text-slate-400 text-xs hidden md:inline">
@@ -4275,7 +4272,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             /* ========================================================= */
             <div className="flex-1 w-full h-full flex flex-col lg:flex-row gap-3 sm:gap-4 overflow-hidden p-1 sm:p-2">
               {/* Left/Center Stage: Screen Presentation */}
-              <div className="flex-1 h-full min-h-[300px] bg-slate-950 rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
+              <div className="flex-1 w-full min-h-0 lg:h-full bg-slate-950 rounded-2xl sm:rounded-3xl border border-slate-800 relative overflow-hidden shadow-2xl flex items-center justify-center">
                 {activeScreenSharer === (userName || (isHost ? 'Host' : 'Guest')) ? (
                   /* THIS USER IS THE PRESENTER */
                   showScreenPreview ? (
@@ -4288,26 +4285,29 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                         className="w-full h-full object-contain bg-black"
                       />
                       {/* Top Overlay Bar */}
-                      <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
-                        <div className="bg-slate-900/90 backdrop-blur-md px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
+                      <div className="absolute top-2 sm:top-3 left-2 sm:left-3 right-2 sm:right-3 flex items-center justify-between gap-2 pointer-events-none">
+                        <div className="bg-slate-900/90 backdrop-blur-md px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-semibold text-white border border-white/10 shadow-lg flex items-center gap-2 pointer-events-auto">
                           <MonitorUp className="w-4 h-4 text-blue-400" />
-                          <span>You are presenting to everyone</span>
+                          <span className="hidden sm:inline">You are presenting to everyone</span>
+                          <span className="sm:hidden">Presenting</span>
                         </div>
                         <div className="flex items-center gap-2 pointer-events-auto">
                           <button
                             type="button"
                             onClick={() => setShowScreenPreview(false)}
-                            className="bg-slate-900/90 hover:bg-slate-800 text-slate-300 text-xs font-semibold px-3 py-1.5 rounded-xl shadow-md border border-white/10 transition-colors"
+                            className="bg-slate-900/90 hover:bg-slate-800 text-slate-300 text-xs font-semibold p-2 sm:px-3 sm:py-1.5 rounded-xl shadow-md border border-white/10 transition-colors"
+                            aria-label="Hide screen preview"
                           >
-                            Hide preview (avoid mirror)
+                            <Minimize2 className="w-3.5 h-3.5 sm:hidden" />
+                            <span className="hidden sm:inline">Hide preview (avoid mirror)</span>
                           </button>
                           <button
                             type="button"
                             onClick={toggleScreenShare}
-                            className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold px-3.5 py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
+                            className="bg-red-600/90 hover:bg-red-600 text-white text-xs font-bold p-2 sm:px-3.5 sm:py-1.5 rounded-xl shadow-lg border border-red-500/30 transition-all active:scale-95 flex items-center gap-1.5"
                           >
                             <Square className="w-3 h-3 fill-current" />
-                            <span>Stop presenting</span>
+                            <span className="hidden sm:inline">Stop presenting</span>
                           </button>
                         </div>
                       </div>
@@ -4402,9 +4402,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               </div>
 
               {/* Right Sidebar: Participant Video Feeds */}
-              <div className="w-full lg:w-72 xl:w-80 flex lg:flex-col flex-row gap-2.5 overflow-x-auto lg:overflow-y-auto shrink-0 max-h-full">
+              <div className="w-full h-24 sm:h-32 lg:h-auto lg:w-72 xl:w-80 flex lg:flex-col flex-row gap-2 overflow-x-auto lg:overflow-x-hidden lg:overflow-y-auto shrink-0 max-h-full pb-1 lg:pb-0">
                 {/* Local User Self-View Tile */}
-                <div className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center">
+                <div className="relative w-36 sm:w-52 lg:w-full h-full lg:h-auto lg:aspect-video rounded-xl sm:rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center">
                   {camEnabled ? (
                     <video
                       data-self-video="true"
@@ -4445,7 +4445,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   return (
                     <div
                       key={participant.id}
-                      className="relative w-48 sm:w-60 lg:w-full aspect-video rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center group"
+                      className="relative w-36 sm:w-52 lg:w-full h-full lg:h-auto lg:aspect-video rounded-xl sm:rounded-2xl bg-slate-900 border border-slate-800/80 overflow-hidden shadow-md shrink-0 flex items-center justify-center group"
                     >
                       {remoteStream && !isVideoStopped ? (
                         <>
@@ -4614,10 +4614,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 </div>
               ) : otherParticipants.length === 1 ? (
                 /* Case 2: Exactly 2 Participants (1 Remote + 1 Local) - Fullscreen Landscape Stage */
-                <div className="w-full h-full flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-6 w-full max-w-[98vw] 2xl:max-w-[99vw] mx-auto p-1 sm:p-2">
+                <div className="w-full h-full min-h-0 grid grid-cols-1 grid-rows-2 sm:flex sm:flex-row items-stretch sm:items-center justify-center gap-2 sm:gap-6 max-w-[98vw] 2xl:max-w-[99vw] mx-auto p-1 sm:p-2">
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-500 ease-out ${
+                    className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-500 ease-out ${
                       isLocalDominant
                         ? 'sm:flex-[1.9] lg:flex-[2.3] scale-[1.01] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10'
                         : dominantSpeaker
@@ -4689,7 +4689,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     return (
                       <div
                         key={participant.id}
-                        className={`relative w-full aspect-video max-h-[76vh] sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-500 ease-out ${
+                        className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video sm:max-h-[85vh] xl:max-h-[88vh] rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-500 ease-out ${
                           isThisRemoteDominant
                             ? 'sm:flex-[1.9] lg:flex-[2.3] scale-[1.01] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10'
                             : dominantSpeaker
@@ -4813,17 +4813,25 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 </div>
               ) : (
                 /* Case 3: 3+ Participants - Responsive Dynamic Active-Speaker Grid */
-                <div className="w-full h-full grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 w-full max-w-[98vw] 2xl:max-w-[99vw] mx-auto items-center justify-center overflow-y-auto p-1 sm:p-2">
+                <div
+                  className={`w-full h-full min-h-0 grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-4 max-w-[98vw] 2xl:max-w-[99vw] mx-auto items-stretch sm:items-center justify-center p-1 sm:p-2 ${
+                    otherParticipants.length + 1 <= 4
+                      ? 'grid-rows-2 overflow-hidden'
+                      : otherParticipants.length + 1 <= 6
+                      ? 'grid-rows-3 overflow-hidden'
+                      : 'auto-rows-[minmax(140px,1fr)] overflow-y-auto overscroll-contain'
+                  } sm:grid-rows-none sm:auto-rows-auto sm:overflow-y-auto`}
+                >
                   {/* Local User Tile */}
                   <div
-                    className={`relative w-full aspect-video rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center transition-all duration-500 ease-out ${
+                    className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video rounded-xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl sm:shadow-2xl flex items-center justify-center transition-all duration-300 sm:duration-500 ease-out ${
                       isLocalDominant
-                        ? 'order-first sm:col-span-2 sm:row-span-2 min-h-[360px] sm:min-h-[460px] xl:min-h-[520px] max-h-[75vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10 scale-[1.01]'
+                        ? 'order-first border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40 z-10 sm:col-span-2 sm:row-span-2 sm:min-h-[460px] xl:min-h-[520px] sm:max-h-[75vh] sm:scale-[1.01] sm:ring-offset-2 sm:ring-offset-slate-950'
                         : dominantSpeaker
-                        ? 'sm:col-span-1 max-h-[40vh] border-slate-800/80 shadow-md opacity-90 scale-[0.98]'
+                        ? 'sm:col-span-1 sm:max-h-[40vh] border-slate-800/80 shadow-md sm:opacity-90 sm:scale-[0.98]'
                         : isLocalSpeaking
-                        ? 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
-                        : 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
+                        ? 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40'
+                        : 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
                     }`}
                   >
                     {camEnabled ? (
@@ -4888,14 +4896,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     return (
                       <div
                         key={participant.id}
-                        className={`relative w-full aspect-video rounded-2xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-2xl flex items-center justify-center group transition-all duration-500 ease-out ${
+                        className={`relative w-full h-full min-h-0 sm:h-auto sm:aspect-video rounded-xl sm:rounded-3xl bg-slate-900 border overflow-hidden shadow-xl sm:shadow-2xl flex items-center justify-center group transition-all duration-300 sm:duration-500 ease-out ${
                           isThisRemoteDominant
-                            ? 'order-first sm:col-span-2 sm:row-span-2 min-h-[360px] sm:min-h-[460px] xl:min-h-[520px] max-h-[75vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40 ring-offset-2 ring-offset-slate-950 z-10 scale-[1.01]'
+                            ? 'order-first border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40 z-10 sm:col-span-2 sm:row-span-2 sm:min-h-[460px] xl:min-h-[520px] sm:max-h-[75vh] sm:scale-[1.01] sm:ring-offset-2 sm:ring-offset-slate-950'
                             : dominantSpeaker
-                            ? 'sm:col-span-1 max-h-[40vh] border-slate-800/80 shadow-md opacity-90 scale-[0.98]'
+                            ? 'sm:col-span-1 sm:max-h-[40vh] border-slate-800/80 shadow-md sm:opacity-90 sm:scale-[0.98]'
                             : isRemoteSpeaking
-                            ? 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-4 ring-[#0b5cff] shadow-2xl shadow-blue-500/40'
-                            : 'sm:col-span-1 max-h-[44vh] sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
+                            ? 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-blue-400 ring-2 sm:ring-4 ring-[#0b5cff] shadow-blue-500/40'
+                            : 'sm:col-span-1 sm:max-h-[48vh] xl:max-h-[52vh] border-slate-800/80 shadow-xl'
                         }`}
                       >
                         {remoteStream && !isVideoStopped ? (
@@ -5507,9 +5515,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       <div className="space-y-3 pt-1 animate-in fade-in duration-150">
                         <div className="flex justify-center p-3 rounded-xl bg-white shadow-inner">
                           {qrDataUrl ? (
-                            <img
+                            <Image
                               src={qrDataUrl}
                               alt={`QR Code for ${meetingId}`}
+                              width={176}
+                              height={176}
+                              unoptimized
                               className="w-44 h-44 object-contain rounded"
                             />
                           ) : (
@@ -5731,20 +5742,20 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       )}
 
       {/* JUMMP MEET FLOATING BOTTOM CONTROL DOCK (Apple-Style Minimalist Dock) */}
-      <footer className="h-20 sm:h-22 bg-slate-950/90 backdrop-blur-2xl border-t border-slate-900/90 px-3 sm:px-6 flex items-center justify-between shrink-0 z-30 pb-safe">
+      <footer className="h-20 sm:h-22 bg-slate-950/90 backdrop-blur-2xl border-t border-slate-900/90 px-1.5 sm:px-6 flex items-center justify-between shrink-0 z-30 pb-safe">
         {/* Left: Meeting Code */}
         <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
           <span className="px-2.5 py-1 rounded-xl bg-slate-900 border border-slate-800 select-all">{meetingId}</span>
         </div>
 
         {/* Center Main Controls Island (Apple-Style Elevated Capsule) */}
-        <div className="flex items-center gap-1.5 sm:gap-2 mx-auto bg-slate-900/80 backdrop-blur-xl border border-white/10 p-1.5 sm:p-2 rounded-3xl shadow-2xl shadow-black/40">
+        <div className="flex items-center gap-1 sm:gap-2 mx-auto max-w-full bg-slate-900/80 backdrop-blur-xl border border-white/10 p-1 sm:p-2 rounded-3xl shadow-2xl shadow-black/40">
           {/* Mic */}
           <div className="relative group">
             <button
               type="button"
               onClick={toggleMic}
-              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
                 micEnabled
                   ? audioVolume > 15
                     ? 'bg-slate-800 text-white border-emerald-400 ring-2 ring-emerald-400/80 shadow-lg shadow-emerald-500/20'
@@ -5764,7 +5775,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <button
               type="button"
               onClick={toggleCam}
-              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
                 camEnabled
                   ? 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
                   : 'bg-red-600 hover:bg-red-700 text-white border-red-500/50 shadow-lg shadow-red-600/30'
@@ -5782,7 +5793,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <button
               type="button"
               onClick={toggleScreenShare}
-              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
                 isScreenSharing
                   ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-500/30'
                   : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
@@ -5801,7 +5812,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               <button
                 type="button"
                 onClick={isRecording ? stopBrowserRecording : startBrowserRecording}
-                className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
                   isRecording
                     ? 'bg-red-600 text-white border-red-500 animate-pulse shadow-lg shadow-red-600/30'
                     : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border-white/10'
@@ -5820,7 +5831,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <button
               type="button"
               onClick={toggleHandRaise}
-              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
                 handRaised
                   ? 'bg-amber-500 text-slate-950 font-bold border-amber-400 shadow-lg shadow-amber-500/30'
                   : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
@@ -5841,7 +5852,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 triggerHaptic('light');
                 setShowReactionsPicker(!showReactionsPicker);
               }}
-              className={`p-3 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
                 showReactionsPicker
                   ? 'bg-blue-600 text-white border-blue-500'
                   : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
@@ -5859,7 +5870,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             <button
               type="button"
               onClick={handleLeaveCall}
-              className="px-4 sm:px-5 py-3 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center gap-1.5 active:scale-95 transition-all border border-red-500/50 ml-1"
+              className="px-3 sm:px-5 py-2.5 sm:py-3 rounded-2xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs shadow-lg shadow-red-600/30 flex items-center gap-1.5 active:scale-95 transition-all border border-red-500/50 ml-0.5 sm:ml-1"
             >
               <PhoneOff className="w-5 h-5" />
               <span className="hidden sm:inline">Leave</span>
@@ -5871,7 +5882,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         </div>
 
         {/* Right Action Icons (People / Chat / Notes) */}
-        <div className="flex items-center gap-1 sm:gap-2">
+        <div className="hidden md:flex items-center gap-1 sm:gap-2">
           <div className="relative group">
             <button
               type="button"
@@ -6064,9 +6075,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             {/* QR Card */}
             <div className="p-4 rounded-2xl bg-white shadow-xl flex items-center justify-center mx-auto w-fit">
               {qrDataUrl ? (
-                <img
+                <Image
                   src={qrDataUrl}
                   alt={`QR for ${meetingId}`}
+                  width={224}
+                  height={224}
+                  unoptimized
                   className="w-56 h-56 object-contain"
                 />
               ) : (
