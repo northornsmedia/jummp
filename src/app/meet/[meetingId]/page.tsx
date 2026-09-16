@@ -84,6 +84,8 @@ import {
   MeetingStatusCheck,
 } from '@/lib/supabaseClient';
 import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track } from 'livekit-client';
+import { VisualEffectsDrawer } from '@/components/meet/VisualEffectsDrawer';
+import { VisualEffectsConfig, DEFAULT_EFFECTS_CONFIG } from '@/lib/visualEffectsEngine';
 
 // Helper to format spoken speech into clean, readable lines within paragraphs
 function formatSpokenText(text: string, maxLineLength = 65): string {
@@ -174,6 +176,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const rawCameraStreamRef = useRef<MediaStream | null>(null);
+  const [showEffectsDrawer, setShowEffectsDrawer] = useState(false);
+  const [activeEffectsConfig, setActiveEffectsConfig] = useState<VisualEffectsConfig>({ ...DEFAULT_EFFECTS_CONFIG });
+  const [areEffectsApplied, setAreEffectsApplied] = useState(false);
 
   // Remote WebRTC Streams & Screen Sharing
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
@@ -813,6 +819,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         }
         setLocalStream(stream);
         localStreamRef.current = stream;
+        rawCameraStreamRef.current = stream;
 
         // Attach to lobby preview video if present
         if (localVideoRef.current) {
@@ -2619,6 +2626,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             } else {
               localStreamRef.current = freshMedia;
               setLocalStream(freshMedia);
+              rawCameraStreamRef.current = freshMedia;
             }
             liveTrack = freshTrack;
 
@@ -2773,6 +2781,90 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       audioEnabled: nextState,
       videoEnabled: camEnabled,
     });
+  };
+
+  // =========================================================================
+  // VISUAL EFFECTS & BACKGROUND COMPOSITING HANDLERS
+  // =========================================================================
+  const handleApplyEffects = async (processedStream: MediaStream, config: VisualEffectsConfig) => {
+    setActiveEffectsConfig(config);
+    setAreEffectsApplied(true);
+    setShowEffectsDrawer(false);
+
+    const processedVideoTrack = processedStream.getVideoTracks()[0];
+    if (!processedVideoTrack) return;
+
+    if (inCallVideoRef.current) {
+      inCallVideoRef.current.srcObject = processedStream;
+      inCallVideoRef.current.play().catch(() => {});
+    }
+
+    if (localStreamRef.current) {
+      const oldTrack = localStreamRef.current.getVideoTracks()[0];
+      if (oldTrack) {
+        localStreamRef.current.removeTrack(oldTrack);
+      }
+      localStreamRef.current.addTrack(processedVideoTrack);
+    }
+    setLocalStream(processedStream);
+
+    // Seamlessly replace video track across all WebRTC peer connections (45 FPS studio quality)
+    Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+      try {
+        const videoSender = pc
+          .getSenders()
+          .find(
+            (s) => s.track?.kind === 'video' && s !== screenSendersRef.current[peerName]
+          );
+        if (videoSender) {
+          await videoSender.replaceTrack(processedVideoTrack);
+        }
+      } catch (err) {
+        console.warn('Failed to replace track with visual effects track on peer', peerName, err);
+      }
+    });
+
+    showToast('Visual Effects Applied', 'Your studio background and effects are now live in the call.', 'info');
+  };
+
+  const handleResetEffects = async () => {
+    setActiveEffectsConfig({ ...DEFAULT_EFFECTS_CONFIG });
+    setAreEffectsApplied(false);
+
+    const rawStream = rawCameraStreamRef.current;
+    if (!rawStream) return;
+
+    const rawVideoTrack = rawStream.getVideoTracks()[0];
+    if (!rawVideoTrack) return;
+
+    if (inCallVideoRef.current) {
+      inCallVideoRef.current.srcObject = rawStream;
+      inCallVideoRef.current.play().catch(() => {});
+    }
+
+    if (localStreamRef.current) {
+      const curTrack = localStreamRef.current.getVideoTracks()[0];
+      if (curTrack) {
+        localStreamRef.current.removeTrack(curTrack);
+      }
+      localStreamRef.current.addTrack(rawVideoTrack);
+    }
+    setLocalStream(rawStream);
+
+    Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+      try {
+        const videoSender = pc
+          .getSenders()
+          .find(
+            (s) => s.track?.kind === 'video' && s !== screenSendersRef.current[peerName]
+          );
+        if (videoSender) {
+          await videoSender.replaceTrack(rawVideoTrack);
+        }
+      } catch (err) {}
+    });
+
+    showToast('Effects Cleared', 'Returned to standard camera view.', 'info');
   };
 
   // =========================================================================
@@ -6028,6 +6120,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </span>
           </div>
 
+          {/* Google Meet-Style Visual Effects & Filters */}
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => setShowEffectsDrawer(true)}
+              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
+                areEffectsApplied
+                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-blue-400 shadow-lg shadow-blue-500/30 ring-2 ring-blue-400/40'
+                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border-white/10'
+              }`}
+            >
+              <Sparkles className="w-5 h-5" />
+            </button>
+            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
+              {areEffectsApplied ? 'Visual effects active' : 'Visual effects & filters'}
+            </span>
+          </div>
+
           {/* Browser Record Button (Host Only) */}
           {isHost && (
             <div className="relative group">
@@ -6351,6 +6461,17 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           </div>
         </div>
       )}
+
+      {/* Google Meet-Style Visual Effects & Studio Filters Drawer */}
+      <VisualEffectsDrawer
+        isOpen={showEffectsDrawer}
+        onClose={() => setShowEffectsDrawer(false)}
+        rawStream={rawCameraStreamRef.current || localStream}
+        onApplyEffects={handleApplyEffects}
+        onResetEffects={handleResetEffects}
+        activeConfig={activeEffectsConfig}
+        isApplied={areEffectsApplied}
+      />
     </div>
   );
 }
