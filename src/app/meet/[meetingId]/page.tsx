@@ -242,9 +242,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       if (!pNormalized) continue;
 
       // Strictly skip the local user (prevents host or user seeing self as a remote tile)
-      if (pNormalized === myNormalized) continue;
-      // If we are the host, skip any participant marked as host or named 'host'
-      if (isHost && (p.isHost || pNormalized === 'host')) continue;
+      if (pNormalized === myNormalized || p.id === participantId) continue;
 
       const existing = byName.get(pNormalized);
       if (!existing) {
@@ -263,7 +261,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
 
     return Array.from(byName.values());
-  }, [participants, userName, isHost]);
+  }, [participants, userName, isHost, participantId]);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     { id: '1', sender: 'JUMMP Bot', text: 'Welcome to JUMMP Meet. Call is encrypted and ready.', time: 'Just now' },
   ]);
@@ -589,8 +587,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     const myNormalized = (userName || (isHost ? 'Host' : '')).trim().toLowerCase();
     const otherParticipantsCount = participants.filter((p) => {
       const pNorm = (p.name || '').trim().toLowerCase();
-      if (!pNorm || pNorm === myNormalized) return false;
-      if (isHost && (p.isHost || pNorm === 'host')) return false;
+      if (!pNorm || pNorm === myNormalized || p.id === participantId) return false;
       return true;
     }).length;
 
@@ -618,7 +615,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }, 8000);
 
     return () => clearInterval(watchdogInterval);
-  }, [inCall, participants, userName, isHost, showStillHereModal]);
+  }, [inCall, participants, userName, isHost, showStillHereModal, participantId]);
 
   // Countdown timer when "Are you still here?" modal is shown
   useEffect(() => {
@@ -3891,6 +3888,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         )
       );
 
+      // Persist host role in database
+      upsertParticipant(meetingId, targetParticipant.name, 'host', 'admitted').catch(() => {});
+
       playChime('admit');
       showToast('Host Promoted', `${targetParticipant.name} is now a Host with full controls!`, 'info');
     } catch (err: any) {
@@ -3946,7 +3946,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         joinedAt: Date.now(),
       };
       // Local host is already rendered via local user video tile. Keep participants strictly for remote peers.
-      setParticipants((prev) => prev.filter((p) => p.name.trim().toLowerCase() !== name.toLowerCase() && !p.isHost));
+      setParticipants((prev) => prev.filter((p) => p.name.trim().toLowerCase() !== name.toLowerCase() && p.id !== participantId));
       void sendHostEvent('HOST_ARRIVED', { hostName: name });
       channelRef.current?.send('USER_JOINED', participant);
       upsertParticipant(meetingId, name, 'host', 'admitted').catch(() => {});
@@ -4379,18 +4379,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     const handleWindowUnload = () => {
       const myName = userName || (isHost ? 'Host' : 'Guest');
-      channelRef.current?.send('USER_LEFT', { name: myName, id: participantId });
+      const remainingHosts = otherParticipants.filter((p) => p.isHost).length;
+
+      if (isHost && remainingHosts === 0) {
+        // Last host left by closing window or tab! End meeting for everyone
+        channelRef.current?.send('MEETING_ENDED_BY_HOSTS', {
+          byHost: myName,
+          message: 'Webinar has been ended by the hosts. Thank you for joining!',
+        });
+        endMeeting(meetingId).catch(() => {});
+      } else {
+        channelRef.current?.send('USER_LEFT', { name: myName, id: participantId, isHost });
+        if (otherParticipants.length === 0) {
+          endMeeting(meetingId).catch(() => {});
+        }
+      }
+
       if (livekitRoomRef.current) {
         try {
           livekitRoomRef.current.disconnect();
         } catch {}
       }
       markParticipantLeft(meetingId, myName).catch(() => {});
-
-      // If nobody else is left, mark meeting inactive in database
-      if (otherParticipants.length === 0 || isHost) {
-        endMeeting(meetingId).catch(() => {});
-      }
     };
 
     window.addEventListener('beforeunload', handleWindowUnload);
@@ -4399,7 +4409,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       window.removeEventListener('beforeunload', handleWindowUnload);
       window.removeEventListener('pagehide', handleWindowUnload);
     };
-  }, [inCall, userName, isHost, meetingId, participantId, otherParticipants.length]);
+  }, [inCall, userName, isHost, meetingId, participantId, otherParticipants]);
 
   // Reopen or Activate Meeting
   const handleReopenMeeting = async () => {
