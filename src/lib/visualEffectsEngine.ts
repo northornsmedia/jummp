@@ -124,6 +124,19 @@ export class VisualEffectsEngine {
   private maskCanvas: HTMLCanvasElement;
   private maskCtx: CanvasRenderingContext2D;
 
+  // Zero-Allocation Reusable Buffers (Google Meet Standard)
+  private personCanvas: HTMLCanvasElement;
+  private personCtx: CanvasRenderingContext2D;
+  private blurDownsampleCanvas: HTMLCanvasElement;
+  private blurDownsampleCtx: CanvasRenderingContext2D;
+  private segmenterInputCanvas: HTMLCanvasElement;
+  private segmenterInputCtx: CanvasRenderingContext2D;
+  private centerStageSampleCanvas: HTMLCanvasElement;
+  private centerStageSampleCtx: CanvasRenderingContext2D;
+
+  private isSegmenting = false;
+  private lastSegmentTime = 0;
+
   constructor() {
     this.videoElement = document.createElement('video');
     this.videoElement.autoplay = true;
@@ -139,6 +152,26 @@ export class VisualEffectsEngine {
     this.maskCanvas.width = 1280;
     this.maskCanvas.height = 720;
     this.maskCtx = this.maskCanvas.getContext('2d')!;
+
+    this.personCanvas = document.createElement('canvas');
+    this.personCanvas.width = 1280;
+    this.personCanvas.height = 720;
+    this.personCtx = this.personCanvas.getContext('2d', { alpha: true })!;
+
+    this.segmenterInputCanvas = document.createElement('canvas');
+    this.segmenterInputCanvas.width = 320;
+    this.segmenterInputCanvas.height = 180;
+    this.segmenterInputCtx = this.segmenterInputCanvas.getContext('2d', { alpha: false })!;
+
+    this.blurDownsampleCanvas = document.createElement('canvas');
+    this.blurDownsampleCanvas.width = 320;
+    this.blurDownsampleCanvas.height = 180;
+    this.blurDownsampleCtx = this.blurDownsampleCanvas.getContext('2d', { alpha: false })!;
+
+    this.centerStageSampleCanvas = document.createElement('canvas');
+    this.centerStageSampleCanvas.width = 64;
+    this.centerStageSampleCanvas.height = 36;
+    this.centerStageSampleCtx = this.centerStageSampleCanvas.getContext('2d', { alpha: false })!;
 
     this.initParticles();
     this.preloadBackgroundImages();
@@ -211,7 +244,7 @@ export class VisualEffectsEngine {
       });
 
       this.segmenter.setOptions({
-        modelSelection: 1, // 1 = landscape/full quality model (Google Meet style)
+        modelSelection: 0, // 0 = general ultra-fast lightweight model (Google Meet low-power standard)
         selfieMode: true,
       });
 
@@ -234,8 +267,10 @@ export class VisualEffectsEngine {
     const w = this.canvasElement.width;
     const h = this.canvasElement.height;
 
-    this.maskCanvas.width = w;
-    this.maskCanvas.height = h;
+    if (this.maskCanvas.width !== w || this.maskCanvas.height !== h) {
+      this.maskCanvas.width = w;
+      this.maskCanvas.height = h;
+    }
     this.maskCtx.save();
     this.maskCtx.clearRect(0, 0, w, h);
     this.maskCtx.drawImage(results.segmentationMask, 0, 0, w, h);
@@ -253,8 +288,8 @@ export class VisualEffectsEngine {
     // Ensure segmenter is ready in background
     this.loadMediaPipe().catch(() => {});
 
-    // Generate output stream captured at 45 FPS
-    this.outputStream = this.canvasElement.captureStream(45);
+    // Generate output stream captured at 30 FPS (Google Meet / WebRTC standard)
+    this.outputStream = this.canvasElement.captureStream(30);
 
     // Add audio track from camera stream to output stream
     const audioTrack = sourceStream.getAudioTracks()[0];
@@ -287,6 +322,7 @@ export class VisualEffectsEngine {
       this.videoElement.pause();
       this.videoElement.srcObject = null;
     }
+    this.isSegmenting = false;
   }
 
   private renderLoop = async () => {
@@ -297,13 +333,44 @@ export class VisualEffectsEngine {
       if (this.canvasElement.width !== vidWidth || this.canvasElement.height !== vidHeight) {
         this.canvasElement.width = vidWidth;
         this.canvasElement.height = vidHeight;
+        this.maskCanvas.width = vidWidth;
+        this.maskCanvas.height = vidHeight;
+        this.personCanvas.width = vidWidth;
+        this.personCanvas.height = vidHeight;
       }
 
-      // Send to segmenter if loaded
-      if (this.isSegmenterLoaded && this.segmenter) {
+      // Check if background replacement or blur or auto-framing is active
+      const needsSegmentation =
+        this.config.blurLevel !== 'none' ||
+        this.config.backgroundImage !== 'none' ||
+        this.config.backgroundVideo !== 'none' ||
+        this.config.autoFraming;
+
+      // Google Meet optimization:
+      // 1. Only run ML segmentation IF an effect actually needs it
+      // 2. Throttle ML segmentation to ~20 FPS (every 48ms) instead of 45-60 FPS
+      // 3. Send downscaled 320x180 buffer to ML model to reduce compute by ~90%
+      const now = performance.now();
+      if (
+        needsSegmentation &&
+        this.isSegmenterLoaded &&
+        this.segmenter &&
+        !this.isSegmenting &&
+        now - this.lastSegmentTime >= 48
+      ) {
+        this.lastSegmentTime = now;
+        this.isSegmenting = true;
         try {
-          await this.segmenter.send({ image: this.videoElement });
-        } catch {}
+          this.segmenterInputCtx.drawImage(this.videoElement, 0, 0, 320, 180);
+          this.segmenter
+            .send({ image: this.segmenterInputCanvas })
+            .catch(() => {})
+            .finally(() => {
+              this.isSegmenting = false;
+            });
+        } catch {
+          this.isSegmenting = false;
+        }
       }
 
       this.renderFrame();
@@ -370,21 +437,21 @@ export class VisualEffectsEngine {
         this.renderBlurredBackground(ctx, w, h, sx, sy, sw, sh);
       }
 
-      // B. DRAW PERSON (FOREGROUND MASKING)
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = w;
-      tempCanvas.height = h;
-      const tempCtx = tempCanvas.getContext('2d')!;
+      // B. DRAW PERSON (FOREGROUND MASKING) - ZERO GC ALLOCATIONS
+      const pCanvas = this.personCanvas;
+      const pCtx = this.personCtx;
+      pCtx.clearRect(0, 0, w, h);
 
       // Draw original camera feed
-      tempCtx.drawImage(this.videoElement, sx, sy, sw, sh, 0, 0, w, h);
+      pCtx.drawImage(this.videoElement, sx, sy, sw, sh, 0, 0, w, h);
 
       // Cut out background using segmentation mask
-      tempCtx.globalCompositeOperation = 'destination-in';
-      tempCtx.drawImage(this.maskCanvas, 0, 0, w, h);
+      pCtx.globalCompositeOperation = 'destination-in';
+      pCtx.drawImage(this.maskCanvas, 0, 0, w, h);
+      pCtx.globalCompositeOperation = 'source-over';
 
       // Blend person over chosen background
-      ctx.drawImage(tempCanvas, 0, 0);
+      ctx.drawImage(pCanvas, 0, 0);
       ctx.restore();
     } else {
       // Standard raw video render (with auto-framing if enabled)
@@ -411,13 +478,10 @@ export class VisualEffectsEngine {
     let centerY = 0.45;
 
     try {
-      if (this.isSegmenterLoaded && this.animTick % 6 === 0) {
+      if (this.isSegmenterLoaded && this.animTick % 10 === 0) {
         const sampleW = 64;
         const sampleH = 36;
-        const sampleCanvas = document.createElement('canvas');
-        sampleCanvas.width = sampleW;
-        sampleCanvas.height = sampleH;
-        const sCtx = sampleCanvas.getContext('2d')!;
+        const sCtx = this.centerStageSampleCtx;
         sCtx.drawImage(this.maskCanvas, 0, 0, sampleW, sampleH);
         const data = sCtx.getImageData(0, 0, sampleW, sampleH).data;
 
@@ -461,15 +525,28 @@ export class VisualEffectsEngine {
     sw: number,
     sh: number
   ) {
-    let blurPx = 16;
-    if (this.config.blurLevel === 'subtle') blurPx = 8;
-    else if (this.config.blurLevel === 'deep') blurPx = 30;
+    let blurPx = 14;
+    if (this.config.blurLevel === 'subtle') blurPx = 6;
+    else if (this.config.blurLevel === 'deep') blurPx = 24;
     if (this.config.blurRadius > 0) blurPx = this.config.blurRadius;
 
+    // Google Meet style: downsample by 4x, apply light blur, draw scaled up
+    // This reduces pixel fill rate for blur by ~16x!
+    const dw = this.blurDownsampleCanvas.width;
+    const dh = this.blurDownsampleCanvas.height;
+    const dCtx = this.blurDownsampleCtx;
+
+    dCtx.save();
+    const scaledBlur = Math.max(2, Math.round(blurPx / 3.5));
+    dCtx.filter = `blur(${scaledBlur}px)`;
+    dCtx.drawImage(this.videoElement, sx, sy, sw, sh, -10, -10, dw + 20, dh + 20);
+    dCtx.filter = 'none';
+    dCtx.restore();
+
     ctx.save();
-    ctx.filter = `blur(${blurPx}px)`;
-    ctx.drawImage(this.videoElement, sx, sy, sw, sh, -20, -20, w + 40, h + 40);
-    ctx.filter = 'none';
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'medium';
+    ctx.drawImage(this.blurDownsampleCanvas, 0, 0, w, h);
     ctx.restore();
   }
 

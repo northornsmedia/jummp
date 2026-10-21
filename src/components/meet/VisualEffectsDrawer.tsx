@@ -51,7 +51,7 @@ export function VisualEffectsDrawer({
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
 
-  // Sync with active config whenever drawer opens
+  // Sync with active config whenever drawer opens or closes
   useEffect(() => {
     if (isOpen) {
       setConfig({ ...activeConfig });
@@ -60,8 +60,13 @@ export function VisualEffectsDrawer({
       if (rawStream) {
         engine.start(rawStream);
       }
+    } else {
+      // If drawer closes and effects were not applied live in the call, stop the engine to prevent background CPU/GPU usage
+      if (!isApplied) {
+        getVisualEffectsEngine().stop();
+      }
     }
-  }, [isOpen, activeConfig, rawStream]);
+  }, [isOpen, activeConfig, rawStream, isApplied]);
 
   // Update engine whenever local config changes
   useEffect(() => {
@@ -115,6 +120,7 @@ export function VisualEffectsDrawer({
     setConfig({ ...DEFAULT_EFFECTS_CONFIG });
     const engine = getVisualEffectsEngine();
     engine.setConfig(DEFAULT_EFFECTS_CONFIG);
+    engine.stop();
     onResetEffects();
   };
 

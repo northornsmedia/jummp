@@ -85,7 +85,7 @@ import {
 } from '@/lib/supabaseClient';
 import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track } from 'livekit-client';
 import { VisualEffectsDrawer } from '@/components/meet/VisualEffectsDrawer';
-import { VisualEffectsConfig, DEFAULT_EFFECTS_CONFIG } from '@/lib/visualEffectsEngine';
+import { VisualEffectsConfig, DEFAULT_EFFECTS_CONFIG, getVisualEffectsEngine } from '@/lib/visualEffectsEngine';
 
 // Helper to format spoken speech into clean, readable lines within paragraphs
 function formatSpokenText(text: string, maxLineLength = 65): string {
@@ -799,13 +799,20 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const acquireMedia = useCallback(
     async () => {
       try {
+        const isMobileDevice = typeof window !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
         const stream = await navigator.mediaDevices.getUserMedia({
           video: camEnabled
             ? {
                 facingMode: 'user',
-                width: { ideal: 1920, min: 640 },
-                height: { ideal: 1080, min: 360 },
-                frameRate: { ideal: 45, max: 45, min: 15 },
+                width: isMobileDevice
+                  ? { ideal: 854, max: 1280, min: 480 }
+                  : { ideal: 1280, max: 1920, min: 640 },
+                height: isMobileDevice
+                  ? { ideal: 480, max: 720, min: 270 }
+                  : { ideal: 720, max: 1080, min: 360 },
+                frameRate: isMobileDevice
+                  ? { ideal: 24, max: 30, min: 15 }
+                  : { ideal: 30, max: 30, min: 15 },
               }
             : false,
           audio: micEnabled
@@ -2607,12 +2614,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         liveTrack.enabled = true;
       } else {
         try {
+          const isMobileDevice = typeof window !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
           const freshMedia = await navigator.mediaDevices.getUserMedia({
             video: {
               facingMode: 'user',
-              width: { ideal: 1920, min: 640 },
-              height: { ideal: 1080, min: 360 },
-              frameRate: { ideal: 45, max: 45, min: 15 },
+              width: isMobileDevice
+                ? { ideal: 854, max: 1280, min: 480 }
+                : { ideal: 1280, max: 1920, min: 640 },
+              height: isMobileDevice
+                ? { ideal: 480, max: 720, min: 270 }
+                : { ideal: 720, max: 1080, min: 360 },
+              frameRate: isMobileDevice
+                ? { ideal: 24, max: 30, min: 15 }
+                : { ideal: 30, max: 30, min: 15 },
             },
           });
           const freshTrack = freshMedia.getVideoTracks()[0];
@@ -2808,7 +2822,18 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
     setLocalStream(processedStream);
 
-    // Seamlessly replace video track across all WebRTC peer connections (45 FPS studio quality)
+    // Seamlessly replace video track across LiveKit & WebRTC peer connections (Google Meet standard)
+    if (livekitRoomRef.current) {
+      try {
+        const participant = livekitRoomRef.current.localParticipant;
+        const existingVideo = participant.getTrackPublication(Track.Source.Camera)?.track;
+        if (existingVideo) await participant.unpublishTrack(existingVideo);
+        await participant.publishTrack(processedVideoTrack, { source: Track.Source.Camera });
+      } catch (err) {
+        console.warn('Failed to replace track with visual effects track on LiveKit', err);
+      }
+    }
+
     Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
       try {
         const videoSender = pc
@@ -2831,6 +2856,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     setActiveEffectsConfig({ ...DEFAULT_EFFECTS_CONFIG });
     setAreEffectsApplied(false);
 
+    // Stop the visual effects engine loop immediately to free CPU/GPU resources
+    const engine = getVisualEffectsEngine();
+    engine.stop();
+
     const rawStream = rawCameraStreamRef.current;
     if (!rawStream) return;
 
@@ -2850,6 +2879,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       localStreamRef.current.addTrack(rawVideoTrack);
     }
     setLocalStream(rawStream);
+
+    if (livekitRoomRef.current) {
+      try {
+        const participant = livekitRoomRef.current.localParticipant;
+        const existingVideo = participant.getTrackPublication(Track.Source.Camera)?.track;
+        if (existingVideo) await participant.unpublishTrack(existingVideo);
+        await participant.publishTrack(rawVideoTrack, { source: Track.Source.Camera });
+      } catch (err) {}
+    }
 
     Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
       try {
@@ -3149,7 +3187,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         const screenVideoConstraints = {
           width: { ideal: 1920, max: 2560 },
           height: { ideal: 1080, max: 1440 },
-          frameRate: { ideal: 45, max: 45 },
+          frameRate: { ideal: 30, max: 30 },
         };
 
         if (isMobileDevice) {
