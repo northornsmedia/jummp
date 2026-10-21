@@ -302,6 +302,52 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [activeSpeakers, setActiveSpeakers] = useState<Set<string>>(new Set());
   const [dominantSpeaker, setDominantSpeaker] = useState<string | null>(null);
   const dominantSpeakerTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Google Meet-Grade 1,000-Attendee Scalability: Max 11 remote tiles on-screen in primary grid (12 total including self)
+  // Keeps browser hardware decoder and CPU usage minimal while thousands can attend.
+  const MAX_GRID_REMOTE_TILES = 11;
+  const MAX_FILMSTRIP_REMOTE_TILES = 5;
+
+  const sortedOtherParticipants = useMemo(() => {
+    return [...otherParticipants].sort((a, b) => {
+      const aName = (a.name || '').trim().toLowerCase();
+      const bName = (b.name || '').trim().toLowerCase();
+
+      // 1. Dominant speaker first
+      const aDom = dominantSpeaker === aName ? 1 : 0;
+      const bDom = dominantSpeaker === bName ? 1 : 0;
+      if (aDom !== bDom) return bDom - aDom;
+
+      // 2. Currently active speakers
+      const aSpk = activeSpeakers.has(aName) ? 1 : 0;
+      const bSpk = activeSpeakers.has(bName) ? 1 : 0;
+      if (aSpk !== bSpk) return bSpk - aSpk;
+
+      // 3. Hand raised
+      const aHand = a.handRaised ? 1 : 0;
+      const bHand = b.handRaised ? 1 : 0;
+      if (aHand !== bHand) return bHand - aHand;
+
+      // 4. Host
+      const aHost = a.isHost ? 1 : 0;
+      const bHost = b.isHost ? 1 : 0;
+      if (aHost !== bHost) return bHost - aHost;
+
+      // 5. Participants with camera video streaming
+      const aVid = (a.videoEnabled !== false && Boolean(remoteStreams[a.name] || remoteStreams[aName])) ? 1 : 0;
+      const bVid = (b.videoEnabled !== false && Boolean(remoteStreams[b.name] || remoteStreams[bName])) ? 1 : 0;
+      return bVid - aVid;
+    });
+  }, [otherParticipants, dominantSpeaker, activeSpeakers, remoteStreams]);
+
+  const visibleGridParticipants = useMemo(() => {
+    return sortedOtherParticipants.slice(0, MAX_GRID_REMOTE_TILES);
+  }, [sortedOtherParticipants]);
+
+  const visibleFilmstripParticipants = useMemo(() => {
+    return sortedOtherParticipants.slice(0, MAX_FILMSTRIP_REMOTE_TILES);
+  }, [sortedOtherParticipants]);
+
   const [newCustomNote, setNewCustomNote] = useState('');
   const recognitionRef = useRef<any>(null);
   const isStartingOrRunningRef = useRef(false);
@@ -1349,6 +1395,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       if (livekitRoomRef.current) {
         livekitRoomRef.current.disconnect();
         livekitRoomRef.current = null;
+      }
+      if (typeof document !== 'undefined') {
+        document.querySelectorAll('[id^="livekit-audio-"]').forEach((el) => el.remove());
       }
     };
   }, [inCall, meetingId, userName, isHost, hostToken, admissionToken]);
@@ -4780,8 +4829,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   </div>
                 </div>
 
-                {/* Other Remote Participants */}
-                {otherParticipants.map((participant) => {
+                {/* Other Remote Participants (Capped to visibleFilmstripParticipants for 1,000 attendee smoothness) */}
+                {visibleFilmstripParticipants.map((participant) => {
                   const isSharer = participant.name === activeScreenSharer;
                   const remoteStream =
                     remoteStreams[participant.name] ||
@@ -4883,6 +4932,21 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     </div>
                   );
                 })}
+
+                {/* Overflow tile when participants exceed filmstrip limit */}
+                {otherParticipants.length > MAX_FILMSTRIP_REMOTE_TILES && (
+                  <button
+                    type="button"
+                    onClick={() => setActivePanel('people')}
+                    className="relative w-36 sm:w-52 lg:w-full h-full lg:h-auto lg:aspect-video rounded-xl sm:rounded-2xl bg-slate-900/90 border border-dashed border-slate-700/80 hover:border-blue-500/80 hover:bg-slate-800/80 transition-all shrink-0 p-3 flex flex-col items-center justify-center gap-1.5 shadow-md group"
+                    title="View all participants in People drawer"
+                  >
+                    <span className="text-base font-bold text-blue-400 group-hover:scale-110 transition-transform">
+                      +{otherParticipants.length - MAX_FILMSTRIP_REMOTE_TILES}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-medium">Attendees</span>
+                  </button>
+                )}
               </div>
             </div>
           ) : (
@@ -5157,9 +5221,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 /* Case 3: 3+ Participants - Responsive Dynamic Active-Speaker Grid */
                 <div
                   className={`w-full h-full min-h-0 grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-4 max-w-[98vw] 2xl:max-w-[99vw] mx-auto items-stretch sm:items-center justify-center p-1 sm:p-2 ${
-                    otherParticipants.length + 1 <= 4
+                    visibleGridParticipants.length + 1 <= 4
                       ? 'grid-rows-2 overflow-hidden'
-                      : otherParticipants.length + 1 <= 6
+                      : visibleGridParticipants.length + 1 <= 6
                       ? 'grid-rows-3 overflow-hidden'
                       : 'auto-rows-[minmax(140px,1fr)] overflow-y-auto overscroll-contain'
                   } sm:grid-rows-none sm:auto-rows-auto sm:overflow-y-auto`}
@@ -5218,8 +5282,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                     )}
                   </div>
 
-                  {/* Remote Participant Tiles */}
-                  {otherParticipants.map((participant) => {
+                  {/* Remote Participant Tiles (Capped to visibleGridParticipants for 1,000 attendee smoothness) */}
+                  {visibleGridParticipants.map((participant) => {
                     const remoteStream =
                       remoteStreams[participant.name] ||
                       remoteStreams[participant.name.trim()] ||
@@ -5351,6 +5415,24 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                       </div>
                     );
                   })}
+
+                  {/* Overflow Tile when participants exceed grid limit (1,000 user webinar support) */}
+                  {otherParticipants.length > MAX_GRID_REMOTE_TILES && (
+                    <button
+                      type="button"
+                      onClick={() => setActivePanel('people')}
+                      className="relative w-full h-full min-h-0 sm:h-auto sm:aspect-video rounded-xl sm:rounded-3xl bg-slate-900/90 border border-dashed border-slate-700/80 hover:border-blue-500/80 hover:bg-slate-800/80 transition-all p-4 flex flex-col items-center justify-center gap-2 group shadow-xl"
+                      title="View all participants in People drawer"
+                    >
+                      <div className="w-12 h-12 rounded-2xl bg-blue-600/20 text-blue-400 group-hover:bg-blue-600 group-hover:text-white transition-all flex items-center justify-center font-bold text-lg shadow-md group-hover:scale-105">
+                        +{otherParticipants.length - MAX_GRID_REMOTE_TILES}
+                      </div>
+                      <div className="text-center">
+                        <p className="text-xs font-semibold text-slate-200">More Attendees</p>
+                        <p className="text-[10px] text-slate-400">Click to view People list</p>
+                      </div>
+                    </button>
+                  )}
                 </div>
               )}
             </div>
