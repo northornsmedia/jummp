@@ -211,6 +211,21 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   const [pendingRequests, setPendingRequests] = useState<JoinRequest[]>([]);
   const [participants, setParticipants] = useState<Participant[]>([]);
 
+  // Webinar Mode & Media Permission Approval State
+  const [webinarMode, setWebinarMode] = useState<boolean>(false);
+  const [micPermissionGranted, setMicPermissionGranted] = useState<boolean>(false);
+  const [camPermissionGranted, setCamPermissionGranted] = useState<boolean>(false);
+  const [pendingMicRequest, setPendingMicRequest] = useState<boolean>(false);
+  const [pendingCamRequest, setPendingCamRequest] = useState<boolean>(false);
+  const [mediaPermissionRequests, setMediaPermissionRequests] = useState<{
+    id: string;
+    requesterName: string;
+    requesterId: string;
+    kind: 'mic' | 'camera';
+    timestamp: number;
+  }[]>([]);
+  const handleChannelMessageRef = useRef<((msg: any) => void) | null>(null);
+
   // Deduplicated remote participants list (strictly eliminates duplicate tiles and excludes local self/host)
   const otherParticipants = useMemo(() => {
     const myNormalized = (userName || (isHost ? 'Host' : '')).trim().toLowerCase();
@@ -1243,6 +1258,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             }
           });
 
+          room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
+            try {
+              const text = new TextDecoder().decode(payload);
+              const msg = JSON.parse(text);
+              if (msg && msg.type) {
+                handleChannelMessageRef.current?.(msg);
+              }
+            } catch {}
+          });
+
           room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
             const displayName = (participant.name || participant.identity || '').trim();
             const normalizedDisplay = displayName.toLowerCase();
@@ -1665,12 +1690,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           setWaitingToJoin(false);
           setInCall(true);
 
+          if (msg.payload.webinarMode) {
+            setWebinarMode(true);
+            setMicPermissionGranted(false);
+            setCamPermissionGranted(false);
+            setPendingMicRequest(false);
+            setPendingCamRequest(false);
+            setMicEnabled(false);
+            setCamEnabled(false);
+            showToast('Webinar Mode Active', 'The host has Webinar Mode enabled. You must request permission to speak or turn on camera.', 'info');
+          }
+
           const myParticipant: Participant = {
             id: participantId,
             name: userName || 'Guest',
             isHost: false,
-            audioEnabled: latestMeetingStateRef.current.micEnabled,
-            videoEnabled: latestMeetingStateRef.current.camEnabled,
+            audioEnabled: msg.payload.webinarMode ? false : latestMeetingStateRef.current.micEnabled,
+            videoEnabled: msg.payload.webinarMode ? false : latestMeetingStateRef.current.camEnabled,
             handRaised: false,
             isScreenSharing: false,
             joinedAt: Date.now(),
@@ -1814,6 +1850,14 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             });
           }
 
+          // If Webinar Mode is currently active, sync to newcomer
+          if (isHost && webinarMode) {
+            channelRef.current?.send('WEBINAR_MODE_UPDATE', {
+              enabled: true,
+              byHost: myName,
+            });
+          }
+
           if (transportMode !== 'livekit') try {
             const pc = createPeerConnection(joinedName);
             // Ensure camera/mic tracks are attached
@@ -1934,6 +1978,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'MUTE_PARTICIPANT_AUDIO') {
         const myName = userName || (isHost ? 'Host' : 'Guest');
         if (msg.payload?.targetName === myName) {
+          setMicPermissionGranted(false);
+          setPendingMicRequest(false);
           setMicEnabled(false);
           if (localStreamRef.current) {
             localStreamRef.current.getAudioTracks().forEach((t) => {
@@ -1955,6 +2001,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         }
       } else if (msg.type === 'MUTE_ALL_AUDIO') {
         if (!isHost) {
+          setMicPermissionGranted(false);
+          setPendingMicRequest(false);
           setMicEnabled(false);
           if (localStreamRef.current) {
             localStreamRef.current.getAudioTracks().forEach((t) => {
@@ -1973,6 +2021,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'STOP_PARTICIPANT_VIDEO') {
         const myName = userName || (isHost ? 'Host' : 'Guest');
         if (msg.payload?.targetName === myName) {
+          setCamPermissionGranted(false);
+          setPendingCamRequest(false);
           setCamEnabled(false);
           if (localStreamRef.current) {
             localStreamRef.current.getVideoTracks().forEach((t) => {
@@ -1994,6 +2044,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         }
       } else if (msg.type === 'STOP_ALL_VIDEO') {
         if (!isHost) {
+          setCamPermissionGranted(false);
+          setPendingCamRequest(false);
           setCamEnabled(false);
           if (localStreamRef.current) {
             localStreamRef.current.getVideoTracks().forEach((t) => {
@@ -2009,6 +2061,85 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         setParticipants((prev) =>
           prev.map((p) => (!p.isHost ? { ...p, videoEnabled: false } : p))
         );
+      } else if (msg.type === 'MEDIA_PERMISSION_REQUEST') {
+        if (isHost) {
+          const { requesterName, requesterId, kind } = msg.payload || {};
+          if (requesterName && kind) {
+            setMediaPermissionRequests((prev) => {
+              if (prev.some((r) => r.requesterId === requesterId && r.kind === kind)) {
+                return prev;
+              }
+              return [
+                ...prev,
+                {
+                  id: `${requesterId || requesterName}-${kind}-${Date.now()}`,
+                  requesterName,
+                  requesterId: requesterId || requesterName,
+                  kind,
+                  timestamp: Date.now(),
+                },
+              ];
+            });
+            playChime('knock');
+            showToast(
+              'Permission Request',
+              `${requesterName} is requesting to turn on ${kind === 'mic' ? 'microphone' : 'camera'}`,
+              'info'
+            );
+          }
+        }
+      } else if (msg.type === 'CANCEL_MEDIA_PERMISSION_REQUEST') {
+        if (isHost) {
+          const { requesterId, kind } = msg.payload || {};
+          setMediaPermissionRequests((prev) =>
+            prev.filter((r) => !(r.requesterId === requesterId && r.kind === kind))
+          );
+        }
+      } else if (msg.type === 'MEDIA_PERMISSION_RESPONSE') {
+        const myName = userName || (isHost ? 'Host' : 'Guest');
+        const { targetName, targetId, kind, approved, byHost } = msg.payload || {};
+
+        if (targetId === participantId || targetName === myName) {
+          if (kind === 'mic') {
+            setPendingMicRequest(false);
+            if (approved) {
+              setMicPermissionGranted(true);
+              showToast('Host Approved Request', 'The host allowed you to turn on your microphone! Unmuting...', 'info');
+              playChime('admit');
+              void enableMicrophoneTrack();
+            } else {
+              setMicPermissionGranted(false);
+              showToast('Host Denied Request', 'Host denied your request to turn on the microphone.', 'info');
+              playChime('knock');
+            }
+          } else if (kind === 'camera') {
+            setPendingCamRequest(false);
+            if (approved) {
+              setCamPermissionGranted(true);
+              showToast('Host Approved Request', 'The host allowed you to turn on your camera! Starting video...', 'info');
+              playChime('admit');
+              void enableCameraTrack();
+            } else {
+              setCamPermissionGranted(false);
+              showToast('Host Denied Request', 'Host denied your request to turn on the camera.', 'info');
+              playChime('knock');
+            }
+          }
+        }
+      } else if (msg.type === 'WEBINAR_MODE_UPDATE') {
+        const isEnabled = Boolean(msg.payload?.enabled);
+        setWebinarMode(isEnabled);
+        if (!isHost) {
+          if (isEnabled) {
+            setMicPermissionGranted(false);
+            setCamPermissionGranted(false);
+            setPendingMicRequest(false);
+            setPendingCamRequest(false);
+            showToast('Webinar Mode Active', 'The host enabled Webinar Mode. You must request permission to speak or turn on camera.', 'info');
+          } else {
+            showToast('Webinar Mode Disabled', 'The host disabled Webinar Mode. Open discussion is active.', 'info');
+          }
+        }
       } else if (msg.type === 'MEDIA_STATE_UPDATE') {
         const { participantName, audioEnabled, videoEnabled } = msg.payload || {};
         if (participantName) {
@@ -2222,6 +2353,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     const channel = new MeetChannel(meetingId, handleChannelMessage);
     channelRef.current = channel;
+    handleChannelMessageRef.current = handleChannelMessage;
 
     channel.send('PING_HOST', { timestamp: Date.now() });
 
@@ -2649,201 +2781,360 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     showToast('Document Downloaded', 'Saved meeting notes as Word document (.doc)', 'info');
   };
 
-  // Toggle Camera
-  const toggleCam = async () => {
-    triggerHaptic('light');
-    const nextState = !camEnabled;
-    setCamEnabled(nextState);
+  // Broadcast signal helper across WebSockets and LiveKit SFU data channel
+  const broadcastSignal = useCallback(
+    (type: string, payload: Record<string, unknown>) => {
+      channelRef.current?.send(type, payload);
+      if (livekitRoomRef.current) {
+        try {
+          const data = new TextEncoder().encode(
+            JSON.stringify({ type, payload, meetingId })
+          );
+          livekitRoomRef.current.localParticipant.publishData(data, { reliable: true });
+        } catch {}
+      }
+    },
+    [meetingId]
+  );
+
+  // Directly start camera track
+  const enableCameraTrack = async () => {
+    setCamEnabled(true);
     const myName = userName || (isHost ? 'Host' : 'Guest');
 
-    if (nextState) {
-      // Unmuting video: ensure a live video track exists
-      let liveTrack = localStreamRef.current?.getVideoTracks().find((t) => t.readyState === 'live');
-      if (liveTrack) {
-        liveTrack.enabled = true;
-      } else {
-        try {
-          const isMobileDevice = typeof window !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-          const freshMedia = await navigator.mediaDevices.getUserMedia({
-            video: {
-              facingMode: 'user',
-              width: isMobileDevice
-                ? { ideal: 854, max: 1280, min: 480 }
-                : { ideal: 1280, max: 1920, min: 640 },
-              height: isMobileDevice
-                ? { ideal: 480, max: 720, min: 270 }
-                : { ideal: 720, max: 1080, min: 360 },
-              frameRate: isMobileDevice
-                ? { ideal: 24, max: 30, min: 15 }
-                : { ideal: 30, max: 30, min: 15 },
-            },
-          });
-          const freshTrack = freshMedia.getVideoTracks()[0];
-          if (freshTrack) {
-            if (localStreamRef.current) {
-              localStreamRef.current.getVideoTracks().forEach((t) => {
-                localStreamRef.current?.removeTrack(t);
-                t.stop();
-              });
-              localStreamRef.current.addTrack(freshTrack);
-            } else {
-              localStreamRef.current = freshMedia;
-              setLocalStream(freshMedia);
-              rawCameraStreamRef.current = freshMedia;
-            }
-            liveTrack = freshTrack;
-
-            // Update all WebRTC peer connections with the fresh video track
-            Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
-              try {
-                const videoSender = pc
-                  .getSenders()
-                  .find(
-                    (sender) =>
-                      sender.track?.kind === 'video' && sender !== screenSendersRef.current[peerName]
-                  );
-                if (videoSender) {
-                  await videoSender.replaceTrack(freshTrack);
-                } else {
-                  pc.addTrack(freshTrack, localStreamRef.current!);
-                  const offer = await pc.createOffer();
-                  await pc.setLocalDescription(offer);
-                  channelRef.current?.send('WEBRTC_SIGNAL', {
-                    from: myName,
-                    to: (pc as any)._targetPeer || '',
-                    type: 'offer',
-                    sdp: offer,
-                  });
-                }
-              } catch (e) {
-                console.warn('WebRTC track update error:', e);
-              }
-            });
-          }
-        } catch (err) {
-          console.warn('Failed to start camera:', err);
-          setCamEnabled(false);
-          return;
-        }
-      }
-
-      // Rebind to local video elements immediately
-      if (inCallVideoRef.current && localStreamRef.current) {
-        inCallVideoRef.current.srcObject = localStreamRef.current;
-        inCallVideoRef.current.play().catch(() => {});
-      }
-      if (localVideoRef.current && localStreamRef.current) {
-        localVideoRef.current.srcObject = localStreamRef.current;
-        localVideoRef.current.play().catch(() => {});
-      }
-      document.querySelectorAll('video[data-self-video="true"]').forEach((vid) => {
-        const v = vid as HTMLVideoElement;
-        v.defaultMuted = true;
-        v.muted = true;
-        const stream = localStreamRef.current || localStream;
-        if (stream && v.srcObject !== stream) {
-          v.srcObject = stream;
-        }
-        v.play().catch(() => {});
-      });
+    let liveTrack = localStreamRef.current?.getVideoTracks().find((t) => t.readyState === 'live');
+    if (liveTrack) {
+      liveTrack.enabled = true;
     } else {
-      // Muting video: disable all video tracks
-      if (localStreamRef.current) {
-        localStreamRef.current.getVideoTracks().forEach((t) => {
-          t.enabled = false;
+      try {
+        const isMobileDevice = typeof window !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        const freshMedia = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: 'user',
+            width: isMobileDevice
+              ? { ideal: 854, max: 1280, min: 480 }
+              : { ideal: 1280, max: 1920, min: 640 },
+            height: isMobileDevice
+              ? { ideal: 480, max: 720, min: 270 }
+              : { ideal: 720, max: 1080, min: 360 },
+            frameRate: isMobileDevice
+              ? { ideal: 24, max: 30, min: 15 }
+              : { ideal: 30, max: 30, min: 15 },
+          },
         });
+        const freshTrack = freshMedia.getVideoTracks()[0];
+        if (freshTrack) {
+          if (localStreamRef.current) {
+            localStreamRef.current.getVideoTracks().forEach((t) => {
+              localStreamRef.current?.removeTrack(t);
+              t.stop();
+            });
+            localStreamRef.current.addTrack(freshTrack);
+          } else {
+            localStreamRef.current = freshMedia;
+            setLocalStream(freshMedia);
+            rawCameraStreamRef.current = freshMedia;
+          }
+          liveTrack = freshTrack;
+
+          // Update all WebRTC peer connections with fresh video track
+          Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+            try {
+              const videoSender = pc
+                .getSenders()
+                .find(
+                  (sender) =>
+                    sender.track?.kind === 'video' && sender !== screenSendersRef.current[peerName]
+                );
+              if (videoSender) {
+                await videoSender.replaceTrack(freshTrack);
+              } else {
+                pc.addTrack(freshTrack, localStreamRef.current!);
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                channelRef.current?.send('WEBRTC_SIGNAL', {
+                  from: myName,
+                  to: (pc as any)._targetPeer || '',
+                  type: 'offer',
+                  sdp: offer,
+                });
+              }
+            } catch (e) {
+              console.warn('WebRTC track update error:', e);
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to start camera:', err);
+        setCamEnabled(false);
+        return;
       }
     }
+
+    if (inCallVideoRef.current && localStreamRef.current) {
+      inCallVideoRef.current.srcObject = localStreamRef.current;
+      inCallVideoRef.current.play().catch(() => {});
+    }
+    if (localVideoRef.current && localStreamRef.current) {
+      localVideoRef.current.srcObject = localStreamRef.current;
+      localVideoRef.current.play().catch(() => {});
+    }
+    document.querySelectorAll('video[data-self-video="true"]').forEach((vid) => {
+      const v = vid as HTMLVideoElement;
+      v.defaultMuted = true;
+      v.muted = true;
+      const stream = localStreamRef.current || localStream;
+      if (stream && v.srcObject !== stream) {
+        v.srcObject = stream;
+      }
+      v.play().catch(() => {});
+    });
 
     if (livekitRoomRef.current) {
-      livekitRoomRef.current.localParticipant.setCameraEnabled(nextState).catch(() => {});
+      livekitRoomRef.current.localParticipant.setCameraEnabled(true).catch(() => {});
     }
 
-    // Update self in participants list
     setParticipants((prev) =>
-      prev.map((p) => (p.name === myName ? { ...p, videoEnabled: nextState } : p))
+      prev.map((p) => (p.name === myName ? { ...p, videoEnabled: true } : p))
     );
 
-    channelRef.current?.send('MEDIA_STATE_UPDATE', {
+    broadcastSignal('MEDIA_STATE_UPDATE', {
       participantName: myName,
       audioEnabled: micEnabled,
-      videoEnabled: nextState,
+      videoEnabled: true,
     });
   };
 
-  // Toggle Mic
-  const toggleMic = async () => {
-    triggerHaptic('light');
-    const nextState = !micEnabled;
-    setMicEnabled(nextState);
+  // Directly stop camera track
+  const disableCameraTrack = async () => {
+    setCamEnabled(false);
     const myName = userName || (isHost ? 'Host' : 'Guest');
 
-    if (nextState) {
-      let liveAudio = localStreamRef.current?.getAudioTracks().find((t) => t.readyState === 'live');
-      if (liveAudio) {
-        liveAudio.enabled = true;
-      } else {
-        try {
-          const freshMedia = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true },
-          });
-          const freshAudio = freshMedia.getAudioTracks()[0];
-          if (freshAudio) {
-            if (localStreamRef.current) {
-              localStreamRef.current.getAudioTracks().forEach((t) => {
-                localStreamRef.current?.removeTrack(t);
-                t.stop();
-              });
-              localStreamRef.current.addTrack(freshAudio);
-            } else {
-              localStreamRef.current = freshMedia;
-              setLocalStream(freshMedia);
-            }
-            Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
-              try {
-                const audioSender = pc
-                  .getSenders()
-                  .find(
-                    (sender) =>
-                      sender.track?.kind === 'audio' &&
-                      sender !== screenAudioSendersRef.current[peerName]
-                  );
-                if (audioSender) {
-                  await audioSender.replaceTrack(freshAudio);
-                } else {
-                  pc.addTrack(freshAudio, localStreamRef.current!);
-                }
-              } catch (e) {}
-            });
-          }
-        } catch (err) {
-          console.warn('Failed to start microphone:', err);
-          setMicEnabled(false);
-          return;
-        }
-      }
+    if (localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach((t) => {
+        t.enabled = false;
+      });
+    }
+
+    if (livekitRoomRef.current) {
+      livekitRoomRef.current.localParticipant.setCameraEnabled(false).catch(() => {});
+    }
+
+    setParticipants((prev) =>
+      prev.map((p) => (p.name === myName ? { ...p, videoEnabled: false } : p))
+    );
+
+    broadcastSignal('MEDIA_STATE_UPDATE', {
+      participantName: myName,
+      audioEnabled: micEnabled,
+      videoEnabled: false,
+    });
+  };
+
+  // Directly start microphone track
+  const enableMicrophoneTrack = async () => {
+    setMicEnabled(true);
+    const myName = userName || (isHost ? 'Host' : 'Guest');
+
+    let liveAudio = localStreamRef.current?.getAudioTracks().find((t) => t.readyState === 'live');
+    if (liveAudio) {
+      liveAudio.enabled = true;
     } else {
-      if (localStreamRef.current) {
-        localStreamRef.current.getAudioTracks().forEach((t) => {
-          t.enabled = false;
+      try {
+        const freshMedia = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true },
         });
+        const freshAudio = freshMedia.getAudioTracks()[0];
+        if (freshAudio) {
+          if (localStreamRef.current) {
+            localStreamRef.current.getAudioTracks().forEach((t) => {
+              localStreamRef.current?.removeTrack(t);
+              t.stop();
+            });
+            localStreamRef.current.addTrack(freshAudio);
+          } else {
+            localStreamRef.current = freshMedia;
+            setLocalStream(freshMedia);
+          }
+          Object.entries(peerConnectionsRef.current).forEach(async ([peerName, pc]) => {
+            try {
+              const audioSender = pc
+                .getSenders()
+                .find(
+                  (sender) =>
+                    sender.track?.kind === 'audio' &&
+                    sender !== screenAudioSendersRef.current[peerName]
+                );
+              if (audioSender) {
+                await audioSender.replaceTrack(freshAudio);
+              } else {
+                pc.addTrack(freshAudio, localStreamRef.current!);
+              }
+            } catch (e) {}
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to start microphone:', err);
+        setMicEnabled(false);
+        return;
       }
     }
 
     if (livekitRoomRef.current) {
-      livekitRoomRef.current.localParticipant.setMicrophoneEnabled(nextState).catch(() => {});
+      livekitRoomRef.current.localParticipant.setMicrophoneEnabled(true).catch(() => {});
     }
 
-    // Update self in participants list
     setParticipants((prev) =>
-      prev.map((p) => (p.name === myName ? { ...p, audioEnabled: nextState } : p))
+      prev.map((p) => (p.name === myName ? { ...p, audioEnabled: true } : p))
     );
 
-    channelRef.current?.send('MEDIA_STATE_UPDATE', {
+    broadcastSignal('MEDIA_STATE_UPDATE', {
       participantName: myName,
-      audioEnabled: nextState,
+      audioEnabled: true,
       videoEnabled: camEnabled,
     });
+  };
+
+  // Directly stop microphone track
+  const disableMicrophoneTrack = async () => {
+    setMicEnabled(false);
+    const myName = userName || (isHost ? 'Host' : 'Guest');
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getAudioTracks().forEach((t) => {
+        t.enabled = false;
+      });
+    }
+
+    if (livekitRoomRef.current) {
+      livekitRoomRef.current.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+    }
+
+    setParticipants((prev) =>
+      prev.map((p) => (p.name === myName ? { ...p, audioEnabled: false } : p))
+    );
+
+    broadcastSignal('MEDIA_STATE_UPDATE', {
+      participantName: myName,
+      audioEnabled: false,
+      videoEnabled: camEnabled,
+    });
+  };
+
+  // Toggle Camera (With Webinar Mode Host Approval Guard)
+  const toggleCam = async () => {
+    triggerHaptic('light');
+
+    if (!camEnabled) {
+      // In Webinar Mode: non-host attendees must request host approval
+      if (webinarMode && !isHost && !camPermissionGranted) {
+        if (pendingCamRequest) {
+          showToast('Request Pending', 'Your request to open camera is waiting for host approval.', 'info');
+          return;
+        }
+        setPendingCamRequest(true);
+        const myName = userName || 'Guest';
+        broadcastSignal('MEDIA_PERMISSION_REQUEST', {
+          requesterName: myName,
+          requesterId: participantId,
+          kind: 'camera',
+        });
+        showToast('Approval Requested', 'Waiting for host approval to turn on camera...', 'info');
+        playChime('knock');
+        return;
+      }
+      await enableCameraTrack();
+    } else {
+      await disableCameraTrack();
+    }
+  };
+
+  // Toggle Mic (With Webinar Mode Host Approval Guard)
+  const toggleMic = async () => {
+    triggerHaptic('light');
+
+    if (!micEnabled) {
+      // In Webinar Mode: non-host attendees must request host approval
+      if (webinarMode && !isHost && !micPermissionGranted) {
+        if (pendingMicRequest) {
+          showToast('Request Pending', 'Your request to unmute microphone is waiting for host approval.', 'info');
+          return;
+        }
+        setPendingMicRequest(true);
+        const myName = userName || 'Guest';
+        broadcastSignal('MEDIA_PERMISSION_REQUEST', {
+          requesterName: myName,
+          requesterId: participantId,
+          kind: 'mic',
+        });
+        showToast('Approval Requested', 'Waiting for host approval to turn on microphone...', 'info');
+        playChime('knock');
+        return;
+      }
+      await enableMicrophoneTrack();
+    } else {
+      await disableMicrophoneTrack();
+    }
+  };
+
+  // Toggle Webinar Mode (Host Only)
+  const toggleWebinarMode = () => {
+    if (!isHost) return;
+    triggerHaptic('medium');
+    const nextMode = !webinarMode;
+    setWebinarMode(nextMode);
+
+    broadcastSignal('WEBINAR_MODE_UPDATE', {
+      enabled: nextMode,
+      byHost: userName || 'Host',
+    });
+
+    if (nextMode) {
+      showToast('Webinar Mode ON', 'Attendees must request permission before turning on mic or camera.', 'info');
+      void sendHostEvent('MUTE_ALL_AUDIO', { byHost: userName || 'Host' });
+      void sendHostEvent('STOP_ALL_VIDEO', { byHost: userName || 'Host' });
+    } else {
+      showToast('Webinar Mode OFF', 'Open meeting mode restored. Anyone can turn on mic or camera.', 'info');
+    }
+  };
+
+  // Host response to media permission requests
+  const handleRespondMediaPermission = (
+    req: { id: string; requesterName: string; requesterId: string; kind: 'mic' | 'camera' },
+    approved: boolean
+  ) => {
+    triggerHaptic('medium');
+    setMediaPermissionRequests((prev) =>
+      prev.filter((r) => r.id !== req.id && !(r.requesterId === req.requesterId && r.kind === req.kind))
+    );
+
+    broadcastSignal('MEDIA_PERMISSION_RESPONSE', {
+      targetName: req.requesterName,
+      targetId: req.requesterId,
+      kind: req.kind,
+      approved,
+      byHost: userName || 'Host',
+    });
+
+    if (approved) {
+      showToast('Allowed', `Allowed ${req.requesterName} to open ${req.kind === 'mic' ? 'microphone' : 'camera'}`, 'info');
+    } else {
+      showToast('Rejected', `Denied ${req.requesterName}'s request to open ${req.kind === 'mic' ? 'microphone' : 'camera'}`, 'info');
+    }
+  };
+
+  // Attendee cancels pending media request
+  const cancelMediaRequest = (kind: 'mic' | 'camera') => {
+    triggerHaptic('light');
+    if (kind === 'mic') setPendingMicRequest(false);
+    if (kind === 'camera') setPendingCamRequest(false);
+
+    broadcastSignal('CANCEL_MEDIA_PERMISSION_REQUEST', {
+      requesterName: userName || 'Guest',
+      requesterId: participantId,
+      kind,
+    });
+    showToast('Request Cancelled', `Cancelled ${kind === 'mic' ? 'microphone' : 'camera'} request.`, 'info');
   };
 
   // =========================================================================
@@ -3589,8 +3880,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       id: req.id,
       name: req.name,
       isHost: false,
-      audioEnabled: true,
-      videoEnabled: true,
+      audioEnabled: webinarMode ? false : true,
+      videoEnabled: webinarMode ? false : true,
       handRaised: false,
       isScreenSharing: false,
       joinedAt: Date.now(),
@@ -3605,6 +3896,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       guestId: req.id,
       admissionToken: admission.admissionToken,
       hostName: myName,
+      webinarMode,
       existingParticipants: [
         ...participants.filter(
           (p) =>
@@ -4499,8 +4791,47 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           )}
         </div>
 
-        {/* Center: "Link" Button (opens modal having QR and link) */}
-        <div className="flex items-center justify-center">
+        {/* Center: Webinar Mode & "Link" Button */}
+        <div className="flex items-center justify-center gap-1.5 sm:gap-2">
+          {/* Host Webinar Mode Toggle Button */}
+          {isHost && (
+            <button
+              type="button"
+              onClick={toggleWebinarMode}
+              className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all active:scale-95 shadow-sm ${
+                webinarMode
+                  ? 'bg-purple-600 hover:bg-purple-500 border-purple-400 text-white shadow-purple-600/30 ring-2 ring-purple-400/40'
+                  : 'bg-slate-800/90 hover:bg-slate-700 border-slate-700/80 text-slate-300 hover:text-white'
+              }`}
+              title={
+                webinarMode
+                  ? 'Webinar Mode is ON: Attendees must request permission to turn on mic or camera. Click to turn OFF.'
+                  : 'Webinar Mode is OFF: Click to turn ON Webinar Mode'
+              }
+            >
+              <ShieldCheck className={`w-3.5 h-3.5 ${webinarMode ? 'text-white' : 'text-purple-400'}`} />
+              <span className="hidden sm:inline">Webinar</span>
+              <span
+                className={`text-[9px] px-1.5 py-0.5 rounded font-extrabold uppercase ${
+                  webinarMode ? 'bg-purple-900 text-purple-100' : 'bg-slate-700 text-slate-400'
+                }`}
+              >
+                {webinarMode ? 'ON' : 'OFF'}
+              </span>
+            </button>
+          )}
+
+          {/* Guest Webinar Mode Status Badge */}
+          {!isHost && webinarMode && (
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-purple-950/70 border border-purple-500/40 text-purple-300 text-xs font-medium shadow-sm"
+              title="Webinar Mode active: Only host can allow attendees to unmute mic or turn on camera"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+              <span className="text-[11px] font-semibold hidden sm:inline">Webinar Mode</span>
+            </div>
+          )}
+
           <button
             type="button"
             onClick={() => {
@@ -6172,17 +6503,33 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               type="button"
               onClick={toggleMic}
               className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
-                micEnabled
+                pendingMicRequest
+                  ? 'bg-purple-900/60 text-purple-200 border-purple-400 animate-pulse ring-2 ring-purple-500/50 shadow-lg shadow-purple-500/20'
+                  : micEnabled
                   ? audioVolume > 15
                     ? 'bg-slate-800 text-white border-emerald-400 ring-2 ring-emerald-400/80 shadow-lg shadow-emerald-500/20'
                     : 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
                   : 'bg-red-600 hover:bg-red-700 text-white border-red-500/50 shadow-lg shadow-red-600/30'
               }`}
             >
-              {micEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
+              {pendingMicRequest ? (
+                <div className="w-5 h-5 flex items-center justify-center">
+                  <div className="w-4 h-4 rounded-full border-2 border-purple-300 border-t-transparent animate-spin" />
+                </div>
+              ) : micEnabled ? (
+                <Mic className="w-5 h-5" />
+              ) : (
+                <MicOff className="w-5 h-5" />
+              )}
             </button>
             <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
-              {micEnabled ? 'Mute microphone' : 'Unmute microphone'}
+              {pendingMicRequest
+                ? 'Waiting for host approval...'
+                : micEnabled
+                ? 'Mute microphone'
+                : webinarMode && !isHost && !micPermissionGranted
+                ? 'Request host to unmute'
+                : 'Unmute microphone'}
             </span>
           </div>
 
@@ -6192,15 +6539,31 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               type="button"
               onClick={toggleCam}
               className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
-                camEnabled
+                pendingCamRequest
+                  ? 'bg-purple-900/60 text-purple-200 border-purple-400 animate-pulse ring-2 ring-purple-500/50 shadow-lg shadow-purple-500/20'
+                  : camEnabled
                   ? 'bg-slate-800/90 hover:bg-slate-700 text-white border-white/10'
                   : 'bg-red-600 hover:bg-red-700 text-white border-red-500/50 shadow-lg shadow-red-600/30'
               }`}
             >
-              {camEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
+              {pendingCamRequest ? (
+                <div className="w-5 h-5 flex items-center justify-center">
+                  <div className="w-4 h-4 rounded-full border-2 border-purple-300 border-t-transparent animate-spin" />
+                </div>
+              ) : camEnabled ? (
+                <Video className="w-5 h-5" />
+              ) : (
+                <VideoOff className="w-5 h-5" />
+              )}
             </button>
             <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
-              {camEnabled ? 'Turn off camera' : 'Turn on camera'}
+              {pendingCamRequest
+                ? 'Waiting for host approval...'
+                : camEnabled
+                ? 'Turn off camera'
+                : webinarMode && !isHost && !camPermissionGranted
+                ? 'Request host to turn on camera'
+                : 'Turn on camera'}
             </span>
           </div>
 
@@ -6560,6 +6923,99 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
               <span>{copied ? 'Link Copied!' : 'Copy Meeting Link'}</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* HOST FLOATING WEBINAR MEDIA PERMISSION REQUESTS */}
+      {isHost && mediaPermissionRequests.length > 0 && (
+        <div className="fixed top-16 right-3 sm:right-6 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-auto animate-in slide-in-from-top-3 duration-200">
+          {mediaPermissionRequests.map((req) => (
+            <div
+              key={req.id}
+              className="p-4 rounded-2xl bg-slate-950/95 backdrop-blur-xl border border-purple-500/50 shadow-2xl shadow-purple-950/60 space-y-3 ring-1 ring-white/10"
+            >
+              <div className="flex items-start gap-3">
+                <div className="p-2.5 rounded-xl bg-purple-500/20 border border-purple-500/30 text-purple-300 shrink-0">
+                  {req.kind === 'mic' ? <Mic className="w-5 h-5 text-purple-300" /> : <Video className="w-5 h-5 text-purple-300" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                      Webinar Mode
+                    </span>
+                  </div>
+                  <h4 className="text-sm font-bold text-white leading-snug">
+                    <span className="text-purple-300 font-extrabold">{req.requesterName}</span> is trying to open their {req.kind === 'mic' ? 'microphone' : 'camera'}
+                  </h4>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Allow or reject this attendee&apos;s request to broadcast {req.kind === 'mic' ? 'audio' : 'video'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => handleRespondMediaPermission(req, false)}
+                  className="flex-1 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-300 hover:text-white font-semibold text-xs border border-slate-700 transition-all flex items-center justify-center gap-1.5"
+                >
+                  <X className="w-3.5 h-3.5 text-red-400" />
+                  <span>Reject</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRespondMediaPermission(req, true)}
+                  className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 transition-all flex items-center justify-center gap-1.5"
+                >
+                  <Check className="w-3.5 h-3.5 text-white" />
+                  <span>Allow</span>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ATTENDEE WAITING FOR HOST APPROVAL FLOATING BANNER */}
+      {!isHost && (pendingMicRequest || pendingCamRequest) && (
+        <div className="fixed bottom-24 sm:bottom-28 left-1/2 -translate-x-1/2 z-50 pointer-events-auto animate-in slide-in-from-bottom-3 duration-200 max-w-md w-[92%] sm:w-auto">
+          <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-slate-950/95 backdrop-blur-xl border border-purple-500/50 text-white shadow-2xl shadow-purple-950/60 ring-1 ring-white/10">
+            <div className="flex items-center gap-3">
+              <div className="w-4 h-4 rounded-full border-2 border-purple-400 border-t-transparent animate-spin shrink-0" />
+              <div className="text-xs">
+                <p className="font-bold text-purple-300">
+                  Waiting for host approval...
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  {pendingMicRequest && pendingCamRequest
+                    ? 'Requesting permission for mic and camera'
+                    : pendingMicRequest
+                    ? 'Requesting permission to unmute microphone'
+                    : 'Requesting permission to turn on camera'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {pendingMicRequest && (
+                <button
+                  type="button"
+                  onClick={() => cancelMediaRequest('mic')}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-300 hover:text-white border border-slate-700 transition-colors"
+                >
+                  Cancel Mic
+                </button>
+              )}
+              {pendingCamRequest && (
+                <button
+                  type="button"
+                  onClick={() => cancelMediaRequest('camera')}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-300 hover:text-white border border-slate-700 transition-colors"
+                >
+                  Cancel Cam
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
