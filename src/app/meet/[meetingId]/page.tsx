@@ -6240,24 +6240,6 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             </span>
           </div>
 
-          {/* Google Meet-Style Visual Effects & Filters */}
-          <div className="relative group">
-            <button
-              type="button"
-              onClick={() => setShowEffectsDrawer(true)}
-              className={`p-2.5 sm:p-3.5 rounded-2xl transition-all active:scale-95 border ${
-                areEffectsApplied
-                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-blue-400 shadow-lg shadow-blue-500/30 ring-2 ring-blue-400/40'
-                  : 'bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border-white/10'
-              }`}
-            >
-              <Sparkles className="w-5 h-5" />
-            </button>
-            <span className="absolute -top-9 left-1/2 -translate-x-1/2 bg-slate-900/95 text-white text-[10px] font-medium px-2 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none whitespace-nowrap shadow-xl">
-              {areEffectsApplied ? 'Visual effects active' : 'Visual effects & filters'}
-            </span>
-          </div>
-
           {/* Browser Record Button (Host Only) */}
           {isHost && (
             <div className="relative group">
