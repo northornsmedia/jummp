@@ -35,6 +35,17 @@ export default function LandingPage() {
   const [videoModalOpen, setVideoModalOpen] = useState(false);
   const [faqOpen, setFaqOpen] = useState<number | null>(0);
   const [billingPeriod, setBillingPeriod] = useState<'monthly' | 'annual'>('monthly');
+  const [webinarEndedNotice, setWebinarEndedNotice] = useState(false);
+
+  React.useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('notice') === 'webinar_ended' || params.get('reason') === 'webinar_ended') {
+        setWebinarEndedNotice(true);
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    }
+  }, []);
 
   const faqs = [
     {
@@ -62,6 +73,35 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-white text-[#0a0a0a] flex flex-col selection:bg-blue-100 selection:text-blue-900">
       <Navbar />
+
+      {/* Webinar Ended Banner Modal */}
+      {webinarEndedNotice && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="relative w-full max-w-md bg-slate-950 border border-purple-500/40 rounded-3xl p-6 sm:p-7 text-center shadow-2xl space-y-4 text-white ring-1 ring-white/10">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-purple-600 to-blue-600 text-white flex items-center justify-center mx-auto shadow-xl shadow-purple-600/30">
+              <ShieldCheck className="w-8 h-8" />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-xl sm:text-2xl font-extrabold tracking-tight text-white">
+                Webinar Has Ended
+              </h3>
+              <p className="text-sm text-slate-300 leading-relaxed">
+                Webinar has been ended by the hosts.<br />
+                <strong className="text-purple-300 font-semibold">Thank you for joining!</strong>
+              </p>
+            </div>
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setWebinarEndedNotice(false)}
+                className="w-full py-3 px-5 rounded-2xl bg-[#0b5cff] hover:bg-[#0a75e7] active:scale-95 text-white font-bold text-sm shadow-lg shadow-blue-500/25 transition-all"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="flex-1 pt-20">
         {/* ================= HERO SECTION ================= */}

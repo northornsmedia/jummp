@@ -70,6 +70,10 @@ import {
   createAnonymousMeeting,
   getHostCapability,
   verifyHostCapability,
+  saveHostCapability,
+  promoteParticipantToHost,
+  saveAdmissionCapability,
+  getAdmissionCapability,
 } from '@/lib/meetingSession';
 import {
   createOrGetMeeting,
@@ -1687,6 +1691,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         if (msg.payload.guestId === participantId && typeof msg.payload.admissionToken === 'string') {
           playChime('admit');
           setAdmissionToken(msg.payload.admissionToken);
+          saveAdmissionCapability(meetingId, msg.payload.admissionToken);
           setWaitingToJoin(false);
           setInCall(true);
 
@@ -1934,14 +1939,33 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         const leavingNormalized = leavingName.toLowerCase();
         const leavingId = msg.payload?.id;
 
-        setParticipants((prev) =>
-          prev.filter((p) => {
+        setParticipants((prev) => {
+          const nextParticipants = prev.filter((p) => {
             const pNorm = (p.name || '').trim().toLowerCase();
             if (leavingNormalized && pNorm === leavingNormalized) return false;
             if (leavingId && p.id === leavingId) return false;
             return true;
-          })
-        );
+          });
+
+          // Check if every host has now exited:
+          // If local user is not a host, and no remaining remote participant is a host:
+          const anyHostRemaining = isHost || nextParticipants.some((p) => p.isHost);
+          if (!anyHostRemaining && inCall) {
+            setTimeout(() => {
+              if (localStreamRef.current) {
+                localStreamRef.current.getTracks().forEach((t) => t.stop());
+                localStreamRef.current = null;
+              }
+              if (livekitRoomRef.current) {
+                livekitRoomRef.current.disconnect();
+                livekitRoomRef.current = null;
+              }
+              window.location.href = '/?notice=webinar_ended';
+            }, 300);
+          }
+
+          return nextParticipants;
+        });
         showToast('Participant Left', `${leavingName || 'A participant'} left the room`, 'user');
 
         // Cleanup WebRTC peers
@@ -2140,6 +2164,50 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             showToast('Webinar Mode Disabled', 'The host disabled Webinar Mode. Open discussion is active.', 'info');
           }
         }
+      } else if (msg.type === 'PROMOTE_TO_HOST') {
+        const { targetId, targetName, hostToken: newHostToken, promotedBy } = msg.payload || {};
+        const myName = (userName || (isHost ? 'Host' : 'Guest')).trim();
+        const targetClean = (targetName || '').trim().toLowerCase();
+        const isMe = targetId === participantId || (targetClean && targetClean === myName.toLowerCase());
+
+        // Update participants roster so target now has isHost: true
+        setParticipants((prev) =>
+          prev.map((p) => {
+            const pNorm = (p.name || '').trim().toLowerCase();
+            if (p.id === targetId || (targetClean && pNorm === targetClean)) {
+              return { ...p, isHost: true };
+            }
+            return p;
+          })
+        );
+
+        if (isMe) {
+          if (newHostToken) {
+            saveHostCapability(meetingId, newHostToken);
+            setHostToken(newHostToken);
+          }
+          setIsHost(true);
+          setMicPermissionGranted(true);
+          setCamPermissionGranted(true);
+          setPendingMicRequest(false);
+          setPendingCamRequest(false);
+          playChime('admit');
+          triggerHaptic('heavy');
+          showToast('Promoted to Host!', `${promotedBy || 'The host'} promoted you to Host. You now have full host controls!`, 'user');
+        } else {
+          showToast('New Host Added', `${targetName || 'A participant'} was made Host by ${promotedBy || 'the host'}`, 'user');
+        }
+      } else if (msg.type === 'MEETING_ENDED_BY_HOSTS') {
+        playChime('leave');
+        if (localStreamRef.current) {
+          localStreamRef.current.getTracks().forEach((t) => t.stop());
+          localStreamRef.current = null;
+        }
+        if (livekitRoomRef.current) {
+          livekitRoomRef.current.disconnect();
+          livekitRoomRef.current = null;
+        }
+        window.location.href = '/?notice=webinar_ended';
       } else if (msg.type === 'MEDIA_STATE_UPDATE') {
         const { participantName, audioEnabled, videoEnabled } = msg.payload || {};
         if (participantName) {
@@ -3790,6 +3858,47 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     showToast('Stop All Video', 'All participant video cameras turned off', 'info');
   };
 
+  // Promote Participant to Host (Grants full host capabilities identical to primary host)
+  const handlePromoteToHost = async (targetParticipant: Participant) => {
+    if (!isHost || !hostToken) {
+      showToast('Permission Denied', 'Only an active host can promote participants', 'info');
+      return;
+    }
+    triggerHaptic('medium');
+    try {
+      showToast('Promoting...', `Making ${targetParticipant.name} a co-host...`, 'info');
+      const newHostToken = await promoteParticipantToHost(
+        meetingId,
+        hostToken,
+        targetParticipant.id,
+        targetParticipant.name
+      );
+
+      // Broadcast PROMOTE_TO_HOST room-wide
+      broadcastSignal('PROMOTE_TO_HOST', {
+        targetId: targetParticipant.id,
+        targetName: targetParticipant.name,
+        hostToken: newHostToken,
+        promotedBy: userName || 'Host',
+      });
+
+      // Update locally
+      setParticipants((prev) =>
+        prev.map((p) =>
+          p.id === targetParticipant.id || p.name.trim().toLowerCase() === targetParticipant.name.trim().toLowerCase()
+            ? { ...p, isHost: true }
+            : p
+        )
+      );
+
+      playChime('admit');
+      showToast('Host Promoted', `${targetParticipant.name} is now a Host with full controls!`, 'info');
+    } catch (err: any) {
+      console.error('Failed to promote participant to host:', err);
+      showToast('Promotion Failed', err.message || 'Could not promote participant', 'info');
+    }
+  };
+
   // Toggle Hand Raise (Synchronized across all participants)
   const toggleHandRaise = () => {
     triggerHaptic('medium');
@@ -3842,7 +3951,30 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       channelRef.current?.send('USER_JOINED', participant);
       upsertParticipant(meetingId, name, 'host', 'admitted').catch(() => {});
     } else {
-      // Guest: Approval is strictly required! No open access bypass.
+      // Guest: Check if previously admitted (e.g. recovering from network drop, tab refresh, or accidental exit)
+      const cachedAdmission = admissionToken || getAdmissionCapability(meetingId);
+      if (cachedAdmission) {
+        playChime('admit');
+        setAdmissionToken(cachedAdmission);
+        setWaitingToJoin(false);
+        setInCall(true);
+        const participant: Participant = {
+          id: participantId,
+          name,
+          isHost: false,
+          audioEnabled: webinarMode ? false : micEnabled,
+          videoEnabled: webinarMode ? false : camEnabled,
+          handRaised: false,
+          isScreenSharing: false,
+          joinedAt: Date.now(),
+        };
+        channelRef.current?.send('USER_JOINED', participant);
+        upsertParticipant(meetingId, name, 'guest', 'admitted').catch(() => {});
+        showToast('Reconnected', 'Welcome back to the webinar!', 'info');
+        return;
+      }
+
+      // Guest: First-time join requires host approval
       playChime('knock');
       setWaitingToJoin(true);
       const req: JoinRequest = {
@@ -4141,15 +4273,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
     setIsPiPActive(false);
     const myName = userName || (isHost ? 'Host' : 'Guest');
-    if (channelRef.current) {
-      channelRef.current.send('USER_LEFT', { name: myName, id: participantId });
-    }
     markParticipantLeft(meetingId, myName).catch(() => {});
 
-    // For free users: When the event has ended and no one is in call, mark link inactive!
+    const remainingHosts = otherParticipants.filter((p) => p.isHost).length;
     const remainingCount = otherParticipants.length;
-    if (remainingCount === 0 || isHost) {
+
+    // Condition: If all hosts exit the webinar, end the webinar automatically and send all attendees to homepage
+    if (isHost && remainingHosts === 0) {
+      broadcastSignal('MEETING_ENDED_BY_HOSTS', {
+        byHost: myName,
+        message: 'Webinar has been ended by the hosts. Thank you for joining!',
+      });
       endMeeting(meetingId).catch(() => {});
+
       if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
         const credential = isHost ? hostToken : admissionToken;
         if (credential) {
@@ -4164,6 +4300,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             })
           );
         }
+      }
+
+      // Cleanup local media hardware tracks
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
+        localStreamRef.current = null;
+      }
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        setLocalStream(null);
+      }
+      if (livekitRoomRef.current) {
+        livekitRoomRef.current.disconnect();
+        livekitRoomRef.current = null;
+      }
+      window.location.href = '/?notice=webinar_ended';
+      return;
+    } else {
+      // Normal participant leaving, OR a host leaving while another host is still active in the webinar:
+      broadcastSignal('USER_LEFT', { name: myName, id: participantId, isHost });
+      if (remainingCount === 0) {
+        endMeeting(meetingId).catch(() => {});
       }
     }
 
@@ -5519,6 +5677,17 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                           >
                             {isVideoStopped ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
                           </button>
+                          {/* Make Host Quick Action (Host can promote attendee to Host) */}
+                          {isHost && !participant.isHost && (
+                            <button
+                              type="button"
+                              onClick={() => handlePromoteToHost(participant)}
+                              className="p-1.5 rounded-lg text-purple-400 hover:bg-purple-900/50 hover:text-purple-200 transition-all active:scale-95"
+                              title={`Promote ${participant.name} to Host`}
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
 
                         <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-slate-950/80 backdrop-blur-md px-3 py-1.5 rounded-xl text-xs font-medium border border-white/10 shadow-md">
@@ -6080,6 +6249,19 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                             >
                               {isVideoStopped ? <VideoOff className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
                             </button>
+
+                            {/* Make Host Button (Host can promote attendee to Host) */}
+                            {isHost && !p.isHost && (
+                              <button
+                                type="button"
+                                onClick={() => handlePromoteToHost(p)}
+                                className="px-2 py-1.5 rounded-xl border border-purple-500/40 bg-purple-600/20 hover:bg-purple-600/40 text-purple-300 hover:text-white transition-all active:scale-95 flex items-center gap-1 text-[10px] font-semibold shadow-sm"
+                                title={`Promote ${p.name} to Host (gives them full host power)`}
+                              >
+                                <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+                                <span className="hidden sm:inline">Make Host</span>
+                              </button>
+                            )}
                           </div>
                         </div>
                       );
