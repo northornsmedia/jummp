@@ -84,6 +84,11 @@ import {
   checkMeetingStatus,
   upsertParticipant,
   markParticipantLeft,
+  setMeetingWebinarMode,
+  getMeetingWebinarMode,
+  getActiveHostsInMeeting,
+  checkIfUserIsHostInDB,
+  supabase,
   DBMeeting,
   MeetingStatusCheck,
 } from '@/lib/supabaseClient';
@@ -217,6 +222,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
   // Webinar Mode & Media Permission Approval State
   const [webinarMode, setWebinarMode] = useState<boolean>(false);
+  const webinarModeRef = useRef<boolean>(false);
+  useEffect(() => {
+    webinarModeRef.current = webinarMode;
+  }, [webinarMode]);
+
   const [micPermissionGranted, setMicPermissionGranted] = useState<boolean>(false);
   const [camPermissionGranted, setCamPermissionGranted] = useState<boolean>(false);
   const [pendingMicRequest, setPendingMicRequest] = useState<boolean>(false);
@@ -229,6 +239,8 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     timestamp: number;
   }[]>([]);
   const handleChannelMessageRef = useRef<((msg: any) => void) | null>(null);
+  const enableMicrophoneTrackRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const enableCameraTrackRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   // Deduplicated remote participants list (strictly eliminates duplicate tiles and excludes local self/host)
   const otherParticipants = useMemo(() => {
@@ -454,7 +466,17 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     let cancelled = false;
     const resolveHost = async () => {
       const token = getHostCapability(meetingId);
-      const valid = token ? await verifyHostCapability(meetingId, token).catch(() => false) : false;
+      let valid = token ? await verifyHostCapability(meetingId, token).catch(() => false) : false;
+
+      // If token not found or invalid, check if user is recorded as host in Supabase DB
+      if (!valid && typeof window !== 'undefined') {
+        const storedName = localStorage.getItem(`jummp_username_${meetingId}`) || sessionStorage.getItem('jummp_user_name') || '';
+        if (storedName) {
+          const isHostInDB = await checkIfUserIsHostInDB(meetingId, storedName).catch(() => false);
+          if (isHostInDB) valid = true;
+        }
+      }
+
       if (cancelled) return;
       setHostToken(valid ? token : null);
       setIsHost(valid);
@@ -476,24 +498,31 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     async function initStatus() {
       setIsCheckingStatus(true);
 
-      // Auto-activate meeting whenever a user opens the link!
-      // (For free & returning users: once event ended & empty, opening the link activates it immediately)
       const activeMeeting = await activateMeeting(
         meetingId,
-        isHost ? 'Host' : 'Guest'
+        isHost ? 'Host' : 'Guest',
+        isHost
       );
 
       if (activeMeeting && isMounted) {
         setDbMeeting(activeMeeting);
+        const isEnded = activeMeeting.status === 'ended';
         setStatusCheck({
           exists: true,
           meeting: activeMeeting,
           isExpired: false,
-          isActive: true,
-          isEnded: false,
+          isActive: !isEnded,
+          isEnded,
           daysInactive: 0,
-          message: 'Meeting room is active and ready to join.',
+          message: isEnded
+            ? 'Webinar has been ended by the hosts. Thank you for joining!'
+            : 'Meeting room is active and ready to join.',
         });
+
+        // 1. Sync Webinar Mode directly from Supabase DB on load!
+        if (typeof activeMeeting.is_locked === 'boolean') {
+          setWebinarMode(activeMeeting.is_locked);
+        }
 
         const messages = await getMeetingMessages(activeMeeting.id);
         if (messages && messages.length > 0 && isMounted) {
@@ -510,17 +539,54 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         const check = await checkMeetingStatus(meetingId);
         if (!isMounted) return;
         setStatusCheck(check);
-        if (check.meeting && isMounted) setDbMeeting(check.meeting);
+        if (check.meeting && isMounted) {
+          setDbMeeting(check.meeting);
+          if (typeof check.meeting.is_locked === 'boolean') {
+            setWebinarMode(check.meeting.is_locked);
+          }
+        }
       }
       setIsCheckingStatus(false);
     }
 
     initStatus();
 
+    // Supabase Realtime Postgres Changes listener for persistent DB sync
+    const dbSub = supabase
+      .channel(`db-sync-${meetingId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'meetings',
+        },
+        (payload: any) => {
+          const updated = payload.new as DBMeeting;
+          if (updated && (updated.code === meetingId || updated.id === dbMeeting?.id)) {
+            if (typeof updated.is_locked === 'boolean') {
+              setWebinarMode(updated.is_locked);
+            }
+            if (updated.status === 'ended') {
+              playChime('leave');
+              if (localStreamRef.current) {
+                localStreamRef.current.getTracks().forEach((t) => t.stop());
+              }
+              showToast('Webinar Ended', 'Webinar has been ended by the hosts. Thank you for joining!', 'info');
+              setTimeout(() => {
+                window.location.href = '/?notice=webinar_ended';
+              }, 1200);
+            }
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       isMounted = false;
+      dbSub.unsubscribe();
     };
-  }, [meetingId, hostResolved, isHost]);
+  }, [meetingId, hostResolved, isHost, dbMeeting?.id, showToast]);
 
   // Keep localStreamRef synced
   useEffect(() => {
@@ -1853,7 +1919,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           }
 
           // If Webinar Mode is currently active, sync to newcomer
-          if (isHost && webinarMode) {
+          if (isHost && webinarModeRef.current) {
             channelRef.current?.send('WEBINAR_MODE_UPDATE', {
               enabled: true,
               byHost: myName,
@@ -2127,7 +2193,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               setMicPermissionGranted(true);
               showToast('Host Approved Request', 'The host allowed you to turn on your microphone! Unmuting...', 'info');
               playChime('admit');
-              void enableMicrophoneTrack();
+              void enableMicrophoneTrackRef.current();
             } else {
               setMicPermissionGranted(false);
               showToast('Host Denied Request', 'Host denied your request to turn on the microphone.', 'info');
@@ -2139,7 +2205,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
               setCamPermissionGranted(true);
               showToast('Host Approved Request', 'The host allowed you to turn on your camera! Starting video...', 'info');
               playChime('admit');
-              void enableCameraTrack();
+              void enableCameraTrackRef.current();
             } else {
               setCamPermissionGranted(false);
               showToast('Host Denied Request', 'Host denied your request to turn on the camera.', 'info');
@@ -3086,6 +3152,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     });
   };
 
+  useEffect(() => {
+    enableCameraTrackRef.current = enableCameraTrack;
+    enableMicrophoneTrackRef.current = enableMicrophoneTrack;
+  });
+
   // Toggle Camera (With Webinar Mode Host Approval Guard)
   const toggleCam = async () => {
     triggerHaptic('light');
@@ -3143,12 +3214,16 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   // Toggle Webinar Mode (Host Only)
-  const toggleWebinarMode = () => {
+  const toggleWebinarMode = async () => {
     if (!isHost) return;
     triggerHaptic('medium');
     const nextMode = !webinarMode;
     setWebinarMode(nextMode);
 
+    // 1. Immediately persist Webinar Mode to Supabase database!
+    await setMeetingWebinarMode(meetingId, nextMode);
+
+    // 2. Broadcast to all peers in the room
     broadcastSignal('WEBINAR_MODE_UPDATE', {
       enabled: nextMode,
       byHost: userName || 'Host',
@@ -3889,7 +3964,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       );
 
       // Persist host role in database
-      upsertParticipant(meetingId, targetParticipant.name, 'host', 'admitted').catch(() => {});
+      await upsertParticipant(meetingId, targetParticipant.name, 'host', 'admitted');
 
       playChime('admit');
       showToast('Host Promoted', `${targetParticipant.name} is now a Host with full controls!`, 'info');
@@ -4257,7 +4332,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   // Leave Call
-  const handleLeaveCall = () => {
+  const handleLeaveCall = async () => {
     triggerHaptic('heavy');
     playChime('leave');
     if (pipWindowRef.current && !pipWindowRef.current.closed) {
@@ -4273,18 +4348,27 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
     setIsPiPActive(false);
     const myName = userName || (isHost ? 'Host' : 'Guest');
-    markParticipantLeft(meetingId, myName).catch(() => {});
+    await markParticipantLeft(meetingId, myName);
 
     const remainingHosts = otherParticipants.filter((p) => p.isHost).length;
     const remainingCount = otherParticipants.length;
 
-    // Condition: If all hosts exit the webinar, end the webinar automatically and send all attendees to homepage
+    // Check DB active hosts as secondary guarantee
+    let dbHasOtherHost = false;
     if (isHost && remainingHosts === 0) {
+      try {
+        const dbHosts = await getActiveHostsInMeeting(meetingId);
+        dbHasOtherHost = dbHosts.some((h) => h.trim().toLowerCase() !== myName.trim().toLowerCase());
+      } catch {}
+    }
+
+    // Condition: If all hosts exit the webinar, end the webinar automatically and send all attendees to homepage
+    if (isHost && remainingHosts === 0 && !dbHasOtherHost) {
       broadcastSignal('MEETING_ENDED_BY_HOSTS', {
         byHost: myName,
         message: 'Webinar has been ended by the hosts. Thank you for joining!',
       });
-      endMeeting(meetingId).catch(() => {});
+      await endMeeting(meetingId);
 
       if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
         const credential = isHost ? hostToken : admissionToken;
