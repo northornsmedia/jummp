@@ -92,7 +92,7 @@ import {
   DBMeeting,
   MeetingStatusCheck,
 } from '@/lib/supabaseClient';
-import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track } from 'livekit-client';
+import { Room, RoomEvent, RemoteParticipant, RemoteTrack, Track, Participant as LKParticipant } from 'livekit-client';
 import { VisualEffectsDrawer } from '@/components/meet/VisualEffectsDrawer';
 import { VisualEffectsConfig, DEFAULT_EFFECTS_CONFIG, getVisualEffectsEngine } from '@/lib/visualEffectsEngine';
 
@@ -473,9 +473,9 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         webinarMode?: boolean;
       }
     ) => {
-      if (!isHost || !hostToken) return;
+      if (!isHost || !hostToken) return null;
       try {
-        await fetch('/api/livekit/permission', {
+        const res = await fetch('/api/livekit/permission', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -486,8 +486,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
             activeHosts: otherParticipants.filter((p) => p.isHost).map((p) => p.name),
           }),
         });
+        const data = await res.json().catch(() => null);
+        return data;
       } catch (err) {
         console.warn('Failed to update LiveKit permission:', err);
+        return null;
       }
     },
     [isHost, hostToken, meetingId, otherParticipants]
@@ -1338,15 +1341,99 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 activeScreenSharerRef.current = displayName;
               } else {
                 remoteStreamsRef.current[displayName] = stream;
+                if (participant.identity) {
+                  remoteStreamsRef.current[participant.identity] = stream;
+                }
+                if (participant.name) {
+                  remoteStreamsRef.current[participant.name] = stream;
+                  remoteStreamsRef.current[participant.name.trim().toLowerCase()] = stream;
+                }
                 setRemoteStreams((prev) => ({
                   ...prev,
                   [displayName]: stream,
+                  ...(participant.identity ? { [participant.identity]: stream } : {}),
+                  ...(participant.name ? { [participant.name]: stream } : {}),
+                  ...(participant.name ? { [participant.name.trim().toLowerCase()]: stream } : {}),
                 }));
+
+                // Synchronize participant state to videoEnabled: true
+                setParticipants((prev) =>
+                  prev.map((p) => {
+                    const normName = (participant.name || '').trim().toLowerCase();
+                    if (
+                      p.id === participant.identity ||
+                      (normName && p.name.trim().toLowerCase() === normName)
+                    ) {
+                      return { ...p, videoEnabled: true };
+                    }
+                    return p;
+                  })
+                );
+
+                setTimeout(() => {
+                  document.querySelectorAll('video').forEach((v) => {
+                    v.play().catch(() => {});
+                  });
+                }, 100);
               }
             } else if (track.kind === Track.Kind.Audio) {
+              const existingAudio = document.getElementById(`livekit-audio-${participant.identity}`);
+              if (existingAudio) existingAudio.remove();
               const audioEl = track.attach();
               audioEl.id = `livekit-audio-${participant.identity}`;
               document.body.appendChild(audioEl);
+              audioEl.play().catch(() => {});
+
+              // Synchronize participant state to audioEnabled: true
+              setParticipants((prev) =>
+                prev.map((p) => {
+                  const normName = (participant.name || '').trim().toLowerCase();
+                  if (
+                    p.id === participant.identity ||
+                    (normName && p.name.trim().toLowerCase() === normName)
+                  ) {
+                    return { ...p, audioEnabled: true };
+                  }
+                  return p;
+                })
+              );
+            }
+          });
+
+          room.on(RoomEvent.TrackMuted, (pub, participant: LKParticipant) => {
+            const normName = (participant.name || '').trim().toLowerCase();
+            setParticipants((prev) =>
+              prev.map((p) => {
+                if (
+                  p.id === participant.identity ||
+                  (normName && p.name.trim().toLowerCase() === normName)
+                ) {
+                  if (pub.kind === Track.Kind.Video) return { ...p, videoEnabled: false };
+                  if (pub.kind === Track.Kind.Audio) return { ...p, audioEnabled: false };
+                }
+                return p;
+              })
+            );
+          });
+
+          room.on(RoomEvent.TrackUnmuted, (pub, participant: LKParticipant) => {
+            const normName = (participant.name || '').trim().toLowerCase();
+            setParticipants((prev) =>
+              prev.map((p) => {
+                if (
+                  p.id === participant.identity ||
+                  (normName && p.name.trim().toLowerCase() === normName)
+                ) {
+                  if (pub.kind === Track.Kind.Video) return { ...p, videoEnabled: true };
+                  if (pub.kind === Track.Kind.Audio) return { ...p, audioEnabled: true };
+                }
+                return p;
+              })
+            );
+            if (pub.kind === Track.Kind.Video) {
+              setTimeout(() => {
+                document.querySelectorAll('video').forEach((v) => v.play().catch(() => {}));
+              }, 50);
             }
           });
 
@@ -2212,12 +2299,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
           setMediaPermissionRequests((prev) =>
             prev.filter((r) => !(r.requesterId === requesterId && r.kind === kind))
           );
-        }
-      } else if (msg.type === 'MEDIA_PERMISSION_RESPONSE') {
+        }      } else if (msg.type === 'MEDIA_PERMISSION_RESPONSE') {
         const myName = userName || (isHost ? 'Host' : 'Guest');
         const { targetName, targetId, kind, approved, byHost } = msg.payload || {};
 
-        if (targetId === participantId || targetName === myName) {
+        const isMe =
+          (targetId && (targetId === participantId || targetId === admissionToken)) ||
+          (targetName && myName && targetName.trim().toLowerCase() === myName.trim().toLowerCase());
+
+        if (isMe) {
           if (kind === 'mic') {
             setPendingMicRequest(false);
             if (approved) {
@@ -2305,9 +2395,10 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       } else if (msg.type === 'MEDIA_STATE_UPDATE') {
         const { participantName, audioEnabled, videoEnabled } = msg.payload || {};
         if (participantName) {
+          const normName = participantName.trim().toLowerCase();
           setParticipants((prev) =>
             prev.map((p) =>
-              p.name === participantName
+              p.name.trim().toLowerCase() === normName || p.id === participantName
                 ? {
                     ...p,
                     ...(typeof audioEnabled === 'boolean' ? { audioEnabled } : {}),
@@ -3053,7 +3144,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     });
 
     if (livekitRoomRef.current) {
-      livekitRoomRef.current.localParticipant.setCameraEnabled(true).catch(() => {});
+      const room = livekitRoomRef.current;
+      const activateCamera = async () => {
+        try {
+          await room.localParticipant.setCameraEnabled(true);
+        } catch (err) {
+          console.warn('[LiveKit] Initial setCameraEnabled failed, retrying in 300ms:', err);
+          setTimeout(async () => {
+            try {
+              await room.localParticipant.setCameraEnabled(true);
+            } catch (retryErr) {
+              console.warn('[LiveKit] Retry setCameraEnabled failed, falling back to direct track publish:', retryErr);
+              if (localStreamRef.current) {
+                const vidTrack = localStreamRef.current.getVideoTracks().find((t) => t.readyState === 'live');
+                if (vidTrack) {
+                  await room.localParticipant.publishTrack(vidTrack, { source: Track.Source.Camera }).catch(() => {});
+                }
+              }
+            }
+          }, 300);
+        }
+      };
+      void activateCamera();
     }
 
     setParticipants((prev) =>
@@ -3143,7 +3255,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     }
 
     if (livekitRoomRef.current) {
-      livekitRoomRef.current.localParticipant.setMicrophoneEnabled(true).catch(() => {});
+      const room = livekitRoomRef.current;
+      const activateMic = async () => {
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+        } catch (err) {
+          console.warn('[LiveKit] Initial setMicrophoneEnabled failed, retrying in 300ms:', err);
+          setTimeout(async () => {
+            try {
+              await room.localParticipant.setMicrophoneEnabled(true);
+            } catch (retryErr) {
+              console.warn('[LiveKit] Retry setMicrophoneEnabled failed, falling back to direct track publish:', retryErr);
+              if (localStreamRef.current) {
+                const audTrack = localStreamRef.current.getAudioTracks().find((t) => t.readyState === 'live');
+                if (audTrack) {
+                  await room.localParticipant.publishTrack(audTrack, { source: Track.Source.Microphone }).catch(() => {});
+                }
+              }
+            }
+          }, 300);
+        }
+      };
+      void activateMic();
     }
 
     setParticipants((prev) =>
@@ -3274,7 +3407,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
   };
 
   // Host response to media permission requests
-  const handleRespondMediaPermission = (
+  const handleRespondMediaPermission = async (
     req: { id: string; requesterName: string; requesterId: string; kind: 'mic' | 'camera' },
     approved: boolean
   ) => {
@@ -3283,18 +3416,28 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       prev.filter((r) => r.id !== req.id && !(r.requesterId === req.requesterId && r.kind === req.kind))
     );
 
-    broadcastSignal('MEDIA_PERMISSION_RESPONSE', {
-      targetName: req.requesterName,
-      targetId: req.requesterId,
-      kind: req.kind,
-      approved,
-      byHost: userName || 'Host',
-    });
-
     if (approved) {
       showToast('Allowed', `Allowed ${req.requesterName} to open ${req.kind === 'mic' ? 'microphone' : 'camera'}`, 'info');
-      // Update LiveKit SFU server-side token grant immediately
-      void sendLiveKitPermission('APPROVE_MEDIA', {
+
+      // 1. Immediately update host's local participant state so tile knows they are enabled
+      setParticipants((prev) =>
+        prev.map((p) => {
+          const isTarget =
+            p.id === req.requesterId ||
+            p.name.trim().toLowerCase() === req.requesterName.trim().toLowerCase();
+          if (isTarget) {
+            return {
+              ...p,
+              ...(req.kind === 'camera' ? { videoEnabled: true } : {}),
+              ...(req.kind === 'mic' ? { audioEnabled: true } : {}),
+            };
+          }
+          return p;
+        })
+      );
+
+      // 2. AWAIT LiveKit SFU server-side token grant FIRST so SFU has approved and unmuted before attendee publishes
+      await sendLiveKitPermission('APPROVE_MEDIA', {
         targetParticipantId: req.requesterId,
         targetName: req.requesterName,
         kind: req.kind,
@@ -3308,6 +3451,15 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         kind: req.kind,
       });
     }
+
+    // 3. Broadcast approval signal to attendee AFTER SFU grant is active
+    broadcastSignal('MEDIA_PERMISSION_RESPONSE', {
+      targetName: req.requesterName,
+      targetId: req.requesterId,
+      kind: req.kind,
+      approved,
+      byHost: userName || 'Host',
+    });
   };
 
   // Attendee cancels pending media request
@@ -5481,13 +5633,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                 {visibleFilmstripParticipants.map((participant) => {
                   const isSharer = participant.name === activeScreenSharer;
                   const remoteStream =
+                    remoteStreams[participant.id] ||
                     remoteStreams[participant.name] ||
-                    remoteStreams[participant.name.trim()] ||
+                    remoteStreams[participant.name?.trim()] ||
+                    (participant.name && remoteStreams[participant.name.trim().toLowerCase()]) ||
                     Object.entries(remoteStreams).find(
-                      ([k]) => k.trim().toLowerCase() === participant.name.trim().toLowerCase()
+                      ([k]) =>
+                        k === participant.id ||
+                        (participant.name && k.trim().toLowerCase() === participant.name.trim().toLowerCase())
                     )?.[1];
+                  const hasActiveVideo = Boolean(
+                    remoteStream &&
+                    remoteStream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
+                  );
                   const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
-                  const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+                  const isVideoStopped =
+                    Boolean(locallyMutedVideo[participant.name]) ||
+                    (!hasActiveVideo && participant.videoEnabled === false);
 
                   return (
                     <div
@@ -5734,13 +5896,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   {/* Remote Participant Tile */}
                   {otherParticipants.map((participant) => {
                     const remoteStream =
+                      remoteStreams[participant.id] ||
                       remoteStreams[participant.name] ||
-                      remoteStreams[participant.name.trim()] ||
+                      remoteStreams[participant.name?.trim()] ||
+                      (participant.name && remoteStreams[participant.name.trim().toLowerCase()]) ||
                       Object.entries(remoteStreams).find(
-                        ([k]) => k.trim().toLowerCase() === participant.name.trim().toLowerCase()
+                        ([k]) =>
+                          k === participant.id ||
+                          (participant.name && k.trim().toLowerCase() === participant.name.trim().toLowerCase())
                       )?.[1];
+                    const hasActiveVideo = Boolean(
+                      remoteStream &&
+                      remoteStream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
+                    );
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
-                    const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+                    const isVideoStopped =
+                      Boolean(locallyMutedVideo[participant.name]) ||
+                      (!hasActiveVideo && participant.videoEnabled === false);
                     const isRemoteSpeaking = activeSpeakers.has(participant.name.trim().toLowerCase());
                     const isThisRemoteDominant = dominantSpeaker === participant.name.trim().toLowerCase();
 
@@ -5944,13 +6116,23 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
                   {/* Remote Participant Tiles (Capped to visibleGridParticipants for 1,000 attendee smoothness) */}
                   {visibleGridParticipants.map((participant) => {
                     const remoteStream =
+                      remoteStreams[participant.id] ||
                       remoteStreams[participant.name] ||
-                      remoteStreams[participant.name.trim()] ||
+                      remoteStreams[participant.name?.trim()] ||
+                      (participant.name && remoteStreams[participant.name.trim().toLowerCase()]) ||
                       Object.entries(remoteStreams).find(
-                        ([k]) => k.trim().toLowerCase() === participant.name.trim().toLowerCase()
+                        ([k]) =>
+                          k === participant.id ||
+                          (participant.name && k.trim().toLowerCase() === participant.name.trim().toLowerCase())
                       )?.[1];
+                    const hasActiveVideo = Boolean(
+                      remoteStream &&
+                      remoteStream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
+                    );
                     const isAudioMuted = participant.audioEnabled === false || Boolean(locallyMutedAudio[participant.name]);
-                    const isVideoStopped = participant.videoEnabled === false || Boolean(locallyMutedVideo[participant.name]);
+                    const isVideoStopped =
+                      Boolean(locallyMutedVideo[participant.name]) ||
+                      (!hasActiveVideo && participant.videoEnabled === false);
                     const isRemoteSpeaking = activeSpeakers.has(participant.name.trim().toLowerCase());
                     const isThisRemoteDominant = dominantSpeaker === participant.name.trim().toLowerCase();
 

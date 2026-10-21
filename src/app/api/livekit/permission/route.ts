@@ -45,28 +45,34 @@ export async function POST(req: NextRequest) {
 
     switch (action) {
       case 'APPROVE_MEDIA': {
-        const target = targetParticipantId || targetName;
-        if (!target) {
+        if (!targetParticipantId && !targetName) {
           return NextResponse.json({ error: 'Missing target participant' }, { status: 400 });
         }
-        const ok = await updateParticipantPublishPermissions(room, target, {
-          canPublishMic: kind === 'mic' || kind === 'both',
-          canPublishCamera: kind === 'camera' || kind === 'both',
-        });
-        return NextResponse.json({ success: ok, target, kind, action });
+        const ok = await updateParticipantPublishPermissions(
+          room,
+          { targetParticipantId, targetName },
+          {
+            canPublishMic: kind === 'mic' || kind === 'both',
+            canPublishCamera: kind === 'camera' || kind === 'both',
+          }
+        );
+        return NextResponse.json({ success: ok, targetParticipantId, targetName, kind, action });
       }
 
       case 'REVOKE_MEDIA': {
-        const target = targetParticipantId || targetName;
-        if (!target) {
+        if (!targetParticipantId && !targetName) {
           return NextResponse.json({ error: 'Missing target participant' }, { status: 400 });
         }
-        const ok = await updateParticipantPublishPermissions(room, target, {
-          canPublishMic: kind === 'mic' ? false : undefined,
-          canPublishCamera: kind === 'camera' ? false : undefined,
-          revokeAll: kind === 'all',
-        });
-        return NextResponse.json({ success: ok, target, kind, action });
+        const ok = await updateParticipantPublishPermissions(
+          room,
+          { targetParticipantId, targetName },
+          {
+            canPublishMic: kind === 'mic' ? false : undefined,
+            canPublishCamera: kind === 'camera' ? false : undefined,
+            revokeAll: kind === 'all',
+          }
+        );
+        return NextResponse.json({ success: ok, targetParticipantId, targetName, kind, action });
       }
 
       case 'SET_WEBINAR_MODE': {
@@ -76,14 +82,17 @@ export async function POST(req: NextRequest) {
       }
 
       case 'PROMOTE_HOST': {
-        const target = targetParticipantId || targetName;
-        if (!target) {
+        if (!targetParticipantId && !targetName) {
           return NextResponse.json({ error: 'Missing target participant' }, { status: 400 });
         }
-        const ok = await updateParticipantPublishPermissions(room, target, {
-          canPublishAll: true,
-        });
-        return NextResponse.json({ success: ok, target, action });
+        const ok = await updateParticipantPublishPermissions(
+          room,
+          { targetParticipantId, targetName },
+          {
+            canPublishAll: true,
+          }
+        );
+        return NextResponse.json({ success: ok, targetParticipantId, targetName, action });
       }
 
       case 'MUTE_ALL_AUDIO': {

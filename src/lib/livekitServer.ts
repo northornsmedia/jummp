@@ -16,30 +16,59 @@ export function getLiveKitRoomServiceClient(): RoomServiceClient | null {
   return new RoomServiceClient(url, apiKey, apiSecret);
 }
 
+export type ParticipantTarget =
+  | string
+  | {
+      targetParticipantId?: string;
+      targetName?: string;
+    };
+
 /**
  * Resolves a participant in a LiveKit room by their identity or display name.
  */
 async function resolveParticipant(
   client: RoomServiceClient,
   room: string,
-  identityOrName: string
+  target: ParticipantTarget
 ) {
-  try {
-    // Direct identity lookup
-    const p = await client.getParticipant(room, identityOrName);
-    if (p) return p;
-  } catch {}
+  const targetId = typeof target === 'string' ? target : target.targetParticipantId;
+  const targetName = typeof target === 'string' ? target : target.targetName;
 
+  // 1. Direct identity lookup if targetId is given
+  if (targetId) {
+    try {
+      const p = await client.getParticipant(room, targetId);
+      if (p) return p;
+    } catch {}
+  }
+
+  // 2. Direct identity lookup if targetName is given
+  if (targetName && targetName !== targetId) {
+    try {
+      const p = await client.getParticipant(room, targetName);
+      if (p) return p;
+    } catch {}
+  }
+
+  // 3. Fallback: list participants and match by identity or name (case-insensitive & trimmed)
   try {
-    // Fallback: list participants and search by name or identity
     const list = await client.listParticipants(room);
-    const target = identityOrName.trim().toLowerCase();
-    return list.find(
-      (p) =>
-        p.identity.trim().toLowerCase() === target ||
-        (p.name && p.name.trim().toLowerCase() === target)
+    const idClean = (targetId || '').trim().toLowerCase();
+    const nameClean = (targetName || '').trim().toLowerCase();
+
+    return (
+      list.find((p) => {
+        const pId = p.identity.trim().toLowerCase();
+        const pName = (p.name || '').trim().toLowerCase();
+        if (idClean && pId === idClean) return true;
+        if (nameClean && pName === nameClean) return true;
+        if (nameClean && pId === nameClean) return true;
+        if (idClean && pName === idClean) return true;
+        return false;
+      }) || null
     );
-  } catch {
+  } catch (err) {
+    console.warn(`Failed to list participants in room ${room}:`, err);
     return null;
   }
 }
@@ -50,7 +79,7 @@ async function resolveParticipant(
  */
 export async function updateParticipantPublishPermissions(
   room: string,
-  identityOrName: string,
+  target: ParticipantTarget,
   permissions: {
     canPublishMic?: boolean;
     canPublishCamera?: boolean;
@@ -62,9 +91,10 @@ export async function updateParticipantPublishPermissions(
   if (!client) return false;
 
   try {
-    const participant = await resolveParticipant(client, room, identityOrName);
+    const participant = await resolveParticipant(client, room, target);
     if (!participant) {
-      console.warn(`Participant ${identityOrName} not found in LiveKit room ${room}`);
+      const desc = typeof target === 'string' ? target : `${target.targetName} (${target.targetParticipantId})`;
+      console.warn(`Participant ${desc} not found in LiveKit room ${room}`);
       return false;
     }
 
@@ -92,10 +122,18 @@ export async function updateParticipantPublishPermissions(
     }
 
     if (permissions.canPublishAll) {
+      // Unmute all tracks at SFU level
+      if (participant.tracks) {
+        for (const track of participant.tracks) {
+          if (track.sid) {
+            await client.mutePublishedTrack(room, identity, track.sid, false).catch(() => {});
+          }
+        }
+      }
       await client.updateParticipant(room, identity, {
         permission: {
           canPublish: true,
-          canPublishSources: [],
+          canPublishSources: [TrackSource.CAMERA, TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE],
           canSubscribe: true,
           canPublishData: true,
         },
@@ -113,6 +151,14 @@ export async function updateParticipantPublishPermissions(
       if (!sources.includes(TrackSource.MICROPHONE)) {
         sources.push(TrackSource.MICROPHONE);
       }
+      // Explicitly UNMUTE audio tracks at SFU level so SFU forwards attendee audio!
+      if (participant.tracks) {
+        for (const track of participant.tracks) {
+          if (track.source === TrackSource.MICROPHONE && track.sid) {
+            await client.mutePublishedTrack(room, identity, track.sid, false).catch(() => {});
+          }
+        }
+      }
     } else if (permissions.canPublishMic === false) {
       sources = sources.filter((s) => s !== TrackSource.MICROPHONE);
       // Mute audio track on SFU
@@ -128,6 +174,14 @@ export async function updateParticipantPublishPermissions(
     if (permissions.canPublishCamera === true) {
       if (!sources.includes(TrackSource.CAMERA)) {
         sources.push(TrackSource.CAMERA);
+      }
+      // Explicitly UNMUTE video tracks at SFU level so SFU forwards attendee video frames!
+      if (participant.tracks) {
+        for (const track of participant.tracks) {
+          if (track.source === TrackSource.CAMERA && track.sid) {
+            await client.mutePublishedTrack(room, identity, track.sid, false).catch(() => {});
+          }
+        }
       }
     } else if (permissions.canPublishCamera === false) {
       sources = sources.filter((s) => s !== TrackSource.CAMERA);
@@ -154,7 +208,7 @@ export async function updateParticipantPublishPermissions(
 
     return true;
   } catch (err) {
-    console.warn(`Failed to update LiveKit permissions for ${identityOrName} in ${room}:`, err);
+    console.warn(`Failed to update LiveKit permissions for target in ${room}:`, err);
     return false;
   }
 }
@@ -205,10 +259,17 @@ export async function setRoomWebinarModeSFU(
         }).catch(() => {});
       } else {
         // Restore standard open meeting publishing
+        if (p.tracks) {
+          for (const track of p.tracks) {
+            if (track.sid) {
+              await client.mutePublishedTrack(room, p.identity, track.sid, false).catch(() => {});
+            }
+          }
+        }
         await client.updateParticipant(room, p.identity, {
           permission: {
             canPublish: true,
-            canPublishSources: [],
+            canPublishSources: [TrackSource.CAMERA, TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE],
             canSubscribe: true,
             canPublishData: true,
           },
