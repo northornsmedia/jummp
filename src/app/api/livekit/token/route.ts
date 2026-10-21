@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { AccessToken } from 'livekit-server-sdk';
 import { verifyMeetingCapability } from '@/lib/meetingAuth';
+import { getMeetingWebinarMode } from '@/lib/supabaseClient';
 
 export const runtime = 'nodejs';
 
@@ -45,10 +46,22 @@ export async function POST(req: NextRequest) {
       ttl: '2h',
     });
 
+    const isHost = capability.scope === 'host';
+    let canPublish = true;
+
+    // Strict SFU Track Grant: If Webinar Mode is active, standard attendees join with canPublish: false
+    if (!isHost) {
+      const isWebinar = await getMeetingWebinarMode(room).catch(() => false);
+      if (isWebinar) {
+        canPublish = false;
+      }
+    }
+
     at.addGrant({
       room,
       roomJoin: true,
-      canPublish: true,
+      canPublish,
+      canPublishSources: canPublish ? undefined : [],
       canSubscribe: true,
       canPublishData: true,
     });

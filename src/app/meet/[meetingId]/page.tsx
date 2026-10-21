@@ -462,6 +462,37 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     [meetingId, hostToken]
   );
 
+  // Send strict server-side track permission grants/revocations to LiveKit SFU
+  const sendLiveKitPermission = useCallback(
+    async (
+      action: 'APPROVE_MEDIA' | 'REVOKE_MEDIA' | 'SET_WEBINAR_MODE' | 'PROMOTE_HOST' | 'MUTE_ALL_AUDIO' | 'STOP_ALL_VIDEO',
+      extra?: {
+        targetParticipantId?: string;
+        targetName?: string;
+        kind?: 'mic' | 'camera' | 'both' | 'all';
+        webinarMode?: boolean;
+      }
+    ) => {
+      if (!isHost || !hostToken) return;
+      try {
+        await fetch('/api/livekit/permission', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            room: meetingId,
+            hostToken,
+            action,
+            ...extra,
+            activeHosts: otherParticipants.filter((p) => p.isHost).map((p) => p.name),
+          }),
+        });
+      } catch (err) {
+        console.warn('Failed to update LiveKit permission:', err);
+      }
+    },
+    [isHost, hostToken, meetingId, otherParticipants]
+  );
+
   useEffect(() => {
     let cancelled = false;
     const resolveHost = async () => {
@@ -3233,8 +3264,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       showToast('Webinar Mode ON', 'Attendees must request permission before turning on mic or camera.', 'info');
       void sendHostEvent('MUTE_ALL_AUDIO', { byHost: userName || 'Host' });
       void sendHostEvent('STOP_ALL_VIDEO', { byHost: userName || 'Host' });
+      // 3. Strict LiveKit SFU revoke for all attendees
+      void sendLiveKitPermission('SET_WEBINAR_MODE', { webinarMode: true });
     } else {
       showToast('Webinar Mode OFF', 'Open meeting mode restored. Anyone can turn on mic or camera.', 'info');
+      // 3. Restore LiveKit SFU open publishing
+      void sendLiveKitPermission('SET_WEBINAR_MODE', { webinarMode: false });
     }
   };
 
@@ -3258,8 +3293,20 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
 
     if (approved) {
       showToast('Allowed', `Allowed ${req.requesterName} to open ${req.kind === 'mic' ? 'microphone' : 'camera'}`, 'info');
+      // Update LiveKit SFU server-side token grant immediately
+      void sendLiveKitPermission('APPROVE_MEDIA', {
+        targetParticipantId: req.requesterId,
+        targetName: req.requesterName,
+        kind: req.kind,
+      });
     } else {
       showToast('Rejected', `Denied ${req.requesterName}'s request to open ${req.kind === 'mic' ? 'microphone' : 'camera'}`, 'info');
+      // Revoke LiveKit SFU server-side token grant immediately
+      void sendLiveKitPermission('REVOKE_MEDIA', {
+        targetParticipantId: req.requesterId,
+        targetName: req.requesterName,
+        kind: req.kind,
+      });
     }
   };
 
@@ -3863,6 +3910,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         targetName: participantName,
         byHost: myName,
       });
+      // Revoke audio publish permission on LiveKit SFU
+      void sendLiveKitPermission('REVOKE_MEDIA', {
+        targetName: participantName,
+        kind: 'mic',
+      });
       setParticipants((prev) =>
         prev.map((p) => (p.name === participantName ? { ...p, audioEnabled: false } : p))
       );
@@ -3886,6 +3938,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     triggerHaptic('heavy');
     const myName = userName || (isHost ? 'Host' : 'Guest');
     void sendHostEvent('MUTE_ALL_AUDIO', { byHost: myName });
+    void sendLiveKitPermission('MUTE_ALL_AUDIO');
     setParticipants((prev) =>
       prev.map((p) => (!p.isHost ? { ...p, audioEnabled: false } : p))
     );
@@ -3900,6 +3953,11 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
       void sendHostEvent('STOP_PARTICIPANT_VIDEO', {
         targetName: participantName,
         byHost: myName,
+      });
+      // Revoke video publish permission on LiveKit SFU
+      void sendLiveKitPermission('REVOKE_MEDIA', {
+        targetName: participantName,
+        kind: 'camera',
       });
       setParticipants((prev) =>
         prev.map((p) => (p.name === participantName ? { ...p, videoEnabled: false } : p))
@@ -3924,6 +3982,7 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
     triggerHaptic('heavy');
     const myName = userName || (isHost ? 'Host' : 'Guest');
     void sendHostEvent('STOP_ALL_VIDEO', { byHost: myName });
+    void sendLiveKitPermission('STOP_ALL_VIDEO');
     setParticipants((prev) =>
       prev.map((p) => (!p.isHost ? { ...p, videoEnabled: false } : p))
     );
@@ -3952,6 +4011,12 @@ function MeetContent({ params }: { params: { meetingId: string } }) {
         targetName: targetParticipant.name,
         hostToken: newHostToken,
         promotedBy: userName || 'Host',
+      });
+
+      // Update LiveKit SFU server-side token grant to full host publishing
+      void sendLiveKitPermission('PROMOTE_HOST', {
+        targetParticipantId: targetParticipant.id,
+        targetName: targetParticipant.name,
       });
 
       // Update locally
